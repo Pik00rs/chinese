@@ -4,14 +4,13 @@
 
 // BUILD : ce timestamp change à chaque déploiement (mis à jour automatiquement)
 // Pour forcer une maj, tu peux modifier ce commentaire ou n'importe quoi dans ce fichier
-const BUILD = '2026-05-09T12:00:00Z';
+const BUILD = '2026-05-09T14:00:00Z';
 const CACHE_NAME = `hsk-trainer-${BUILD}`;
 
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
-  './hsk-content.js',
   './lessons.js',
   './icon-192.png',
   './icon-512.png',

@@ -65,7 +65,6 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- HSK content pack (vocabulaire + structures, exposé en globaux) -->
-  <script src="./hsk-content.js"></script>
   <script src="./lessons.js"></script>
 
   <!-- Code de l'app, transpilé à la volée par Babel -->
@@ -160,10 +159,142 @@ function useServiceWorkerUpdate() {
 
 
 // ============================================================
+// HOOK : Permettre l'installation PWA via beforeinstallprompt
+// ============================================================
+// Le navigateur émet 'beforeinstallprompt' quand la PWA est installable
+// On capture l'événement et on l'expose pour pouvoir l'utiliser plus tard via un bouton
+function useInstallPrompt() {
+  const [installPromptEvent, setInstallPromptEvent] = useState(null);
+  const [isInstalled, setIsInstalled] = useState(false);
+
+  useEffect(() => {
+    // Détecter si déjà installée (mode standalone)
+    const checkInstalled = () => {
+      const standalone = window.matchMedia && window.matchMedia('(display-mode: standalone)').matches;
+      const iosStandalone = window.navigator.standalone === true;
+      setIsInstalled(standalone || iosStandalone);
+    };
+    checkInstalled();
+
+    const handler = (e) => {
+      e.preventDefault(); // empêche le mini-bandeau Chrome par défaut
+      setInstallPromptEvent(e);
+    };
+    const installedHandler = () => {
+      setInstallPromptEvent(null);
+      setIsInstalled(true);
+    };
+
+    window.addEventListener('beforeinstallprompt', handler);
+    window.addEventListener('appinstalled', installedHandler);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handler);
+      window.removeEventListener('appinstalled', installedHandler);
+    };
+  }, []);
+
+  const promptInstall = async () => {
+    if (!installPromptEvent) return false;
+    installPromptEvent.prompt();
+    const { outcome } = await installPromptEvent.userChoice;
+    if (outcome === 'accepted') {
+      setInstallPromptEvent(null);
+    }
+    return outcome === 'accepted';
+  };
+
+  return {
+    canInstall: !!installPromptEvent && !isInstalled,
+    isInstalled,
+    promptInstall,
+  };
+}
+
+
+// ============================================================
 // TTS — Lecture audio via Web Speech API native (gratuit, offline-capable)
 // ============================================================
+// Vérifie la préférence audio depuis localStorage
+function isAudioEnabled() {
+  try {
+    const profile = JSON.parse(localStorage.getItem('hsk_profile') || '{}');
+    return profile.audioEnabled !== false;
+  } catch { return true; }
+}
+
+// Vérifie la préférence pinyin tons
+function isPinyinTonesEnabled() {
+  try {
+    const profile = JSON.parse(localStorage.getItem('hsk_profile') || '{}');
+    return profile.pinyinTones !== false;
+  } catch { return true; }
+}
+
+// Strip tons d'un pinyin (wǒ → wo)
+function stripPinyinTones(pinyin) {
+  if (!pinyin) return pinyin;
+  return pinyin
+    .replace(/[āáǎà]/g, 'a').replace(/[ĀÁǍÀ]/g, 'A')
+    .replace(/[ēéěè]/g, 'e').replace(/[ĒÉĚÈ]/g, 'E')
+    .replace(/[īíǐì]/g, 'i').replace(/[ĪÍǏÌ]/g, 'I')
+    .replace(/[ōóǒò]/g, 'o').replace(/[ŌÓǑÒ]/g, 'O')
+    .replace(/[ūúǔù]/g, 'u').replace(/[ŪÚǓÙ]/g, 'U')
+    .replace(/[ǖǘǚǜü]/g, 'u').replace(/[ǕǗǙǛÜ]/g, 'U');
+}
+
+// Affiche le pinyin selon la préférence (avec ou sans tons)
+function displayPinyin(pinyin) {
+  return isPinyinTonesEnabled() ? pinyin : stripPinyinTones(pinyin);
+}
+
+// Distance de Levenshtein (nombre de modifications minimales pour passer de a à b)
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const m = a.length, n = b.length;
+  const prev = Array(n + 1);
+  const curr = Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= n; j++) prev[j] = curr[j];
+  }
+  return prev[n];
+}
+
+// Normalise le pinyin pour comparaison (supprime tons, espaces, ponctuation, casse)
+function normalizePinyin(s) {
+  if (!s) return '';
+  return s.toLowerCase().trim()
+    .replace(/[āáǎà]/g, 'a').replace(/[ēéěè]/g, 'e').replace(/[īíǐì]/g, 'i')
+    .replace(/[ōóǒò]/g, 'o').replace(/[ūúǔù]/g, 'u').replace(/[ǖǘǚǜü]/g, 'u')
+    .replace(/\s+/g, '')
+    .replace(/[，。？！,.?!;]/g, '');
+}
+
+// Vérifie si l'input correspond au pinyin attendu, avec tolérance d'1 lettre de typo
+// Pour les phrases longues (>10 chars), on tolère jusqu'à 2 lettres
+function pinyinMatches(userInput, expected) {
+  const u = normalizePinyin(userInput);
+  const e = normalizePinyin(expected);
+  if (u === e) return { match: true, exact: true };
+  if (!u || !e) return { match: false };
+  // Tolérance : 1 lettre de typo si phrase courte, 2 si longue
+  const maxDist = e.length > 10 ? 2 : 1;
+  const dist = levenshtein(u, e);
+  if (dist <= maxDist) return { match: true, exact: false, distance: dist };
+  return { match: false, distance: dist };
+}
+
 function speak(text, lang = 'zh-CN', rate = 0.85) {
   if (typeof window === 'undefined' || !window.speechSynthesis) return false;
+  // Respecter la préférence audio de l'utilisateur
+  if (!isAudioEnabled()) return false;
   // Annuler une lecture en cours
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
@@ -178,7 +309,8 @@ function speak(text, lang = 'zh-CN', rate = 0.85) {
 }
 
 function isTTSAvailable() {
-  return typeof window !== 'undefined' && !!window.speechSynthesis;
+  // Disponible techniquement ET activé par l'utilisateur
+  return typeof window !== 'undefined' && !!window.speechSynthesis && isAudioEnabled();
 }
 
 
@@ -580,17 +712,8 @@ function getLessonStatus(lessonId) {
 
 // La leçon X est-elle débloquée ? (oui si la précédente est commencée OU c'est une fixed)
 function isLessonAvailable(lessonId) {
-  const lesson = getLessonById(lessonId);
-  if (!lesson) return false;
-  // Les leçons fixes s'enchaînent dans l'ordre, les autres se débloquent quand toutes les fixes sont commencées
-  if (lesson.type === 'fixed' && lesson.order === 1) return true;
-  // Pour les autres : la précédente doit être au moins commencée
-  const lessons = getAllLessons().sort((a, b) => a.order - b.order);
-  const idx = lessons.findIndex(l => l.id === lessonId);
-  if (idx <= 0) return true;
-  const prev = lessons[idx - 1];
-  const status = getLessonStatus(prev.id);
-  return status === 'in_progress' || status === 'completed';
+  // Toutes les leçons sont débloquées : tu peux faire n'importe laquelle, n'importe quand
+  return !!getLessonById(lessonId);
 }
 
 // Reset complet du système leçons (pour repartir à zéro)
@@ -608,16 +731,23 @@ function resetLessonSystem() {
 // ============================================================
 
 // ============================================================
-// VOCABULAIRE — chargé depuis hsk-content.js (variable globale HSK_VOCAB)
-// 585 mots HSK 1+2+3 + 53 structures grammaticales
-// ============================================================
-// HSK1_DATA est gardé comme alias pour rétrocompat avec le code existant
-const HSK1_DATA = (typeof HSK_VOCAB !== 'undefined') ? HSK_VOCAB : [];
+// VOCABULAIRE — chargé depuis lessons.js (variable globale VOCAB)
+// On utilise VOCAB comme source unique de vérité, y compris pour les modes libres
 
-// Helpers pour filtrer par niveau (utilisés ci-dessous)
+// HSK1_DATA est gardé comme alias pour rétrocompat avec le code existant (modes libres)
+// Mais il pointe vers VOCAB transformé pour avoir un tag fictif 'all' (plus de niveau HSK)
+const HSK1_DATA = (typeof VOCAB !== 'undefined') ? VOCAB.map(w => ({
+  id: w.id,
+  hanzi: w.hanzi,
+  pinyin: w.pinyin,
+  fr: w.fr,
+  type: w.type || 'mot',
+  tags: ['all', w.theme || 'misc'],
+})) : [];
+
+// Helpers pour filtrer (legacy) — désormais, on retourne juste tout
 function getVocabForLevels(levels) {
-  // levels = ['hsk1'] ou ['hsk1','hsk2'] ou ['hsk1','hsk2','hsk3']
-  return HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+  return HSK1_DATA;
 }
 
 
@@ -803,9 +933,8 @@ function buildSessionQueue(learnerState, profile, allItems) {
 
   if (facets.length === 0) return [];
 
-  // Filtrer les mots selon les niveaux HSK activés dans le profil
-  const levels = profile.hskLevels && profile.hskLevels.length > 0 ? profile.hskLevels : ['hsk1'];
-  const filteredItems = allItems.filter(w => w.tags.some(t => levels.includes(t)));
+  // Tous les mots sont disponibles maintenant (plus de filtre HSK)
+  const filteredItems = allItems;
 
   for (const item of filteredItems) {
     for (const facet of facets) {
@@ -840,7 +969,6 @@ function HSKApp() {
   const [profile, setProfile] = useState({
     name: 'Matin transport',
     interests: ['hanzi', 'pinyin', 'sens'],
-    hskLevels: ['hsk1'],
     sessionSize: 15,
     newRatio: 0.3,
   });
@@ -867,10 +995,6 @@ function HSKApp() {
           savedProfile.interests = ['hanzi', 'pinyin', 'sens'];
           delete savedProfile.facets;
         }
-        // Rétrocompat : ajouter hskLevels par défaut si absent
-        if (!savedProfile.hskLevels) {
-          savedProfile.hskLevels = ['hsk1'];
-        }
         setProfile(savedProfile);
       }
       if (savedStreak !== null) setStreak(savedStreak || 0);
@@ -894,8 +1018,7 @@ function HSKApp() {
     if (facets.length === 0) return { due: 0, new: 0, learned: 0, total: 0 };
 
     // Filtrer par niveau HSK
-    const levels = profile.hskLevels && profile.hskLevels.length > 0 ? profile.hskLevels : ['hsk1'];
-    const filtered = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+    const filtered = HSK1_DATA;
 
     let due = 0, newCount = 0, learned = 0;
     const total = filtered.length * facets.length;
@@ -909,7 +1032,7 @@ function HSKApp() {
       }
     }
     return { due, new: newCount, learned, total };
-  }, [learnerState, profile.interests, profile.hskLevels]);
+  }, [learnerState, profile.interests]);
 
   const handleSessionComplete = () => {
     const today = new Date().toDateString();
@@ -1306,7 +1429,7 @@ function HomeScreen({ stats, profile, streak, onStartSession, onProfile, onMode,
         <div>
           <p style={{ fontSize: 14, margin: '0 0 3px' }}>{profile.name}</p>
           <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-            {(profile.hskLevels || ['hsk1']).map(l => l.toUpperCase()).join(' + ')} · {profile.interests.join(' · ')}
+            {profile.interests.join(' · ')} · session {profile.sessionSize || 15}
           </p>
         </div>
         <span style={{ color: C.teal, fontSize: 18 }}>›</span>
@@ -1953,12 +2076,19 @@ function Stat({ label, value, color }) {
 // ============================================================
 function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenPack }) {
   const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'uptodate' | 'updating'
+  const { canInstall, isInstalled, promptInstall } = useInstallPrompt();
+  const [installResult, setInstallResult] = useState(null); // 'accepted' | 'declined' | null
 
   const interestOptions = [
     { id: 'hanzi', label: 'Hanzi 汉字', desc: 'Les caractères chinois', color: C.teal },
     { id: 'pinyin', label: 'Pinyin pīnyīn', desc: 'La transcription phonétique', color: C.amber },
     { id: 'sens', label: 'Sens / traduction', desc: 'Le sens en français', color: C.purple },
   ];
+
+  const handleInstall = async () => {
+    const accepted = await promptInstall();
+    setInstallResult(accepted ? 'accepted' : 'declined');
+  };
 
   const checkForUpdates = async () => {
     setUpdateStatus('checking');
@@ -2075,52 +2205,71 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
       <div style={{ height: 1, background: C.border, margin: '24px 0' }} />
 
       <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
-        NIVEAUX HSK ACTIVÉS
+        PRÉFÉRENCES
       </p>
       <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 12px', lineHeight: 1.5 }}>
-        Choisis quels niveaux tu travailles dans tes sessions.
+        Tu peux modifier ces réglages à tout moment.
       </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-        {[
-          { id: 'hsk1', label: 'HSK 1', color: C.teal },
-          { id: 'hsk2', label: 'HSK 2', color: C.purple },
-          { id: 'hsk3', label: 'HSK 3', color: C.pink },
-        ].map(opt => {
-          const active = (profile.hskLevels || ['hsk1']).includes(opt.id);
-          const wordCount = HSK1_DATA.filter(w => w.tags.includes(opt.id)).length;
+
+      {/* Audio on/off */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+        <button onClick={() => setProfile(p => ({ ...p, audioEnabled: !(p.audioEnabled !== false) }))} style={{
+          background: C.bgCard,
+          border: `0.5px solid ${profile.audioEnabled !== false ? C.teal : C.border}`,
+          borderLeft: `2px solid ${profile.audioEnabled !== false ? C.teal : C.border}`,
+          color: C.text, padding: 12, borderRadius: 0, fontSize: 13, textAlign: 'left',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <p style={{ margin: '0 0 2px', fontWeight: 500 }}>♪ Audio</p>
+            <p style={{ fontSize: 10, color: C.textDim, margin: 0 }}>Lecture vocale des hanzi</p>
+          </div>
+          <span style={{ color: profile.audioEnabled !== false ? C.teal : C.textFaint, fontSize: 18 }}>
+            {profile.audioEnabled !== false ? '●' : '○'}
+          </span>
+        </button>
+
+        {/* Tons pinyin */}
+        <button onClick={() => setProfile(p => ({ ...p, pinyinTones: !(p.pinyinTones !== false) }))} style={{
+          background: C.bgCard,
+          border: `0.5px solid ${profile.pinyinTones !== false ? C.purple : C.border}`,
+          borderLeft: `2px solid ${profile.pinyinTones !== false ? C.purple : C.border}`,
+          color: C.text, padding: 12, borderRadius: 0, fontSize: 13, textAlign: 'left',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <div>
+            <p style={{ margin: '0 0 2px', fontWeight: 500 }}>Pinyin avec tons</p>
+            <p style={{ fontSize: 10, color: C.textDim, margin: 0 }}>
+              {profile.pinyinTones !== false ? 'wǒ, nǐ hǎo (avec accents)' : 'wo, ni hao (sans accents)'}
+            </p>
+          </div>
+          <span style={{ color: profile.pinyinTones !== false ? C.purple : C.textFaint, fontSize: 18 }}>
+            {profile.pinyinTones !== false ? '●' : '○'}
+          </span>
+        </button>
+      </div>
+
+      {/* Durée session */}
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '14px 0 8px' }}>
+        DURÉE D'UNE SESSION (modes libres)
+      </p>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 24 }}>
+        {[10, 15, 20, 30].map(size => {
+          const active = (profile.sessionSize || 15) === size;
           return (
-            <button key={opt.id} onClick={() => {
-              setProfile(p => {
-                const current = p.hskLevels || ['hsk1'];
-                const next = current.includes(opt.id)
-                  ? current.filter(x => x !== opt.id)
-                  : [...current, opt.id];
-                if (next.length === 0) return p; // Au moins un niveau
-                return { ...p, hskLevels: next };
-              });
-            }} style={{
-              background: C.bgCard,
-              border: `0.5px solid ${active ? opt.color : C.border}`,
-              borderLeft: `2px solid ${active ? opt.color : C.border}`,
-              color: C.text, padding: 12, borderRadius: 0, fontSize: 13, textAlign: 'left',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <span style={{ fontWeight: 500 }}>{opt.label} <span style={{ color: C.textDim, fontSize: 11, fontWeight: 400 }}>· {wordCount} mots</span></span>
-              <span style={{ color: active ? opt.color : C.textFaint, fontSize: 16 }}>
-                {active ? '●' : '○'}
-              </span>
-            </button>
+            <button key={size}
+              onClick={() => setProfile(p => ({ ...p, sessionSize: size }))}
+              style={{
+                flex: 1,
+                background: active ? C.teal : C.bgCard,
+                border: `0.5px solid ${active ? C.teal : C.border}`,
+                color: active ? C.bg : C.text,
+                padding: '10px 4px', borderRadius: 0,
+                fontSize: 13, fontWeight: active ? 600 : 400,
+              }}>{size}</button>
           );
         })}
       </div>
-      {(() => {
-        const total = HSK1_DATA.filter(w => w.tags.some(t => (profile.hskLevels || ['hsk1']).includes(t))).length;
-        return (
-          <p style={{ fontSize: 11, color: C.teal, margin: '0 0 24px', textAlign: 'center' }}>
-            → {total} mots dans ton pool actuel
-          </p>
-        );
-      })()}
 
       <div style={{ height: 1, background: C.border, margin: '24px 0' }} />
 
@@ -2152,6 +2301,38 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
         </div>
       </button>
 
+      {/* Bouton Installer l'app PWA */}
+      {isInstalled ? (
+        <div style={{
+          width: '100%', background: 'rgba(45,212,191,0.06)',
+          border: `0.5px solid ${C.teal}`,
+          color: C.teal, padding: 13, borderRadius: 8, fontSize: 12, letterSpacing: 1,
+          marginBottom: 8, textAlign: 'center',
+        }}>✓ APPLICATION INSTALLÉE</div>
+      ) : canInstall ? (
+        <button onClick={handleInstall} style={{
+          width: '100%',
+          background: `linear-gradient(135deg, ${C.teal}, ${C.purple})`,
+          color: C.bg, border: 'none',
+          padding: 13, borderRadius: 8, fontSize: 12, letterSpacing: 1, fontWeight: 600,
+          marginBottom: 8,
+        }}>📲 INSTALLER L'APPLICATION</button>
+      ) : (
+        <div style={{
+          width: '100%', background: C.bgCard,
+          border: `0.5px solid ${C.border}`,
+          color: C.textDim, padding: 13, borderRadius: 8, fontSize: 11, letterSpacing: 0.5,
+          marginBottom: 8, textAlign: 'center', lineHeight: 1.4,
+        }}>
+          📲 Pour installer : tap ⋮ dans Chrome → "Installer l'application"
+          {installResult === 'declined' && (
+            <p style={{ fontSize: 10, color: C.amber, margin: '4px 0 0' }}>
+              Tu peux l'installer plus tard depuis le menu Chrome
+            </p>
+          )}
+        </div>
+      )}
+
       <button onClick={checkForUpdates} disabled={updateStatus !== 'idle'} style={{
         width: '100%', background: 'transparent',
         border: `0.5px solid ${updateStatus === 'uptodate' ? C.teal : C.teal}`,
@@ -2174,13 +2355,22 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
       <button onClick={() => {
         if (confirm('Réinitialiser TOUTE ta progression (mots + leçons + erreurs + calendrier) ? Cette action est irréversible.')) {
           if (typeof localStorage !== 'undefined') {
-            localStorage.removeItem('hsk_learner_state');
-            localStorage.removeItem('hsk_streak');
-            localStorage.removeItem('hsk_last_session');
-            localStorage.removeItem('hsk_word_quality');
-            localStorage.removeItem('hsk_lesson_progress');
-            localStorage.removeItem('hsk_error_log');
-            localStorage.removeItem('hsk_calendar');
+            // Clés fixes
+            const keysToRemove = [
+              'hsk_learner_state', 'hsk_streak', 'hsk_last_session',
+              'hsk_word_quality', 'hsk_lesson_progress',
+              'hsk_error_log', 'hsk_calendar', 'hsk_offline_pack',
+            ];
+            keysToRemove.forEach(k => localStorage.removeItem(k));
+            // Clés dynamiques par leçon (hsk_phase3_*, hsk_phase5_*)
+            try {
+              const allKeys = Object.keys(localStorage);
+              for (const k of allKeys) {
+                if (k.startsWith('hsk_phase3_') || k.startsWith('hsk_phase5_')) {
+                  localStorage.removeItem(k);
+                }
+              }
+            } catch {}
             location.reload();
           }
         }
@@ -2204,8 +2394,7 @@ function StatsScreen({ learnerState, profile, onBack }) {
   const breakdown = useMemo(() => {
     const counts = { new: 0, learning: 0, review: 0, relearning: 0 };
     let totalReps = 0, totalLapses = 0;
-    const levels = profile.hskLevels || ['hsk1'];
-    const filtered = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+    const filtered = HSK1_DATA;
     for (const item of filtered) {
       for (const facet of facets) {
         const key = `${item.id}_${facet}`;
@@ -2217,12 +2406,11 @@ function StatsScreen({ learnerState, profile, onBack }) {
     }
     const total = filtered.length * Math.max(facets.length, 1);
     return { counts, totalReps, totalLapses, total };
-  }, [learnerState, profile.interests, profile.hskLevels]);
+  }, [learnerState, profile.interests]);
 
   const knownItems = useMemo(() => {
     if (facets.length === 0) return [];
-    const levels = profile.hskLevels || ['hsk1'];
-    const filtered = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+    const filtered = HSK1_DATA;
     const items = [];
     for (const item of filtered) {
       const states = facets.map(f => learnerState[`${item.id}_${f}`] || initialState());
@@ -2231,7 +2419,7 @@ function StatsScreen({ learnerState, profile, onBack }) {
       items.push({ ...item, avgReps, mastered, total: facets.length });
     }
     return items.filter(i => i.avgReps > 0).sort((a, b) => b.mastered - a.mastered);
-  }, [learnerState, profile.interests, profile.hskLevels]);
+  }, [learnerState, profile.interests]);
 
   return (
     <div className="slide-up">
@@ -2325,309 +2513,232 @@ function DialogueScreen({ learnerState, onBack }) {
 }
 
 // ============================================================
-// ONBOARDING SCREEN — sélection initiale des facettes et préférences
+// ONBOARDING SCREEN — pseudo + 3 préférences (audio, durée, tons)
 // ============================================================
 function OnboardingScreen({ initialProfile, onComplete }) {
   const [step, setStep] = useState(0);
-  const [selectedInterests, setSelectedInterests] = useState(initialProfile.interests || ['hanzi', 'pinyin', 'sens']);
-  const [selectedHskLevels, setSelectedHskLevels] = useState(initialProfile.hskLevels || ['hsk1']);
+  const [profileName, setProfileName] = useState(initialProfile.name || '');
+  const [audioEnabled, setAudioEnabled] = useState(initialProfile.audioEnabled !== false);
+  const [pinyinTones, setPinyinTones] = useState(initialProfile.pinyinTones !== false);
   const [sessionSize, setSessionSize] = useState(initialProfile.sessionSize || 15);
-  const [newRatio, setNewRatio] = useState(initialProfile.newRatio || 0.3);
-  const [profileName, setProfileName] = useState(initialProfile.name || 'Mon profil');
 
-  const interestOptions = [
-    {
-      id: 'hanzi',
-      icon: '汉',
-      title: 'Hanzi',
-      desc: 'Les caractères chinois (爱, 学, 我...)',
-      color: C.teal,
-    },
-    {
-      id: 'pinyin',
-      icon: 'pīn',
-      title: 'Pinyin',
-      desc: 'La transcription phonétique (ài, xué, wǒ)',
-      color: C.amber,
-    },
-    {
-      id: 'sens',
-      icon: 'Fr',
-      title: 'Sens',
-      desc: 'La traduction française (aimer, étudier, je)',
-      color: C.purple,
-    },
-  ];
+  const totalSteps = 4;
 
-  const toggle = (id) => {
-    setSelectedInterests(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
-    );
-  };
-
-  const facetCount = deriveFacets(selectedInterests).length;
-  const canContinue = selectedInterests.length >= 2;
-
-  const finish = () => {
+  const handleComplete = () => {
     onComplete({
-      name: profileName,
-      interests: selectedInterests,
-      hskLevels: selectedHskLevels.length > 0 ? selectedHskLevels : ['hsk1'],
+      name: profileName.trim() || 'Apprenant',
+      interests: ['hanzi', 'pinyin', 'sens'], // par défaut tous, modifiable plus tard
+      audioEnabled,
+      pinyinTones,
       sessionSize,
-      newRatio,
+      newRatio: 0.3,
     });
   };
 
   return (
     <div className="slide-up">
-      <div style={{ display: 'flex', gap: 4, marginBottom: 32 }}>
-        {[0, 1, 2, 3].map(i => (
+      {/* Indicateur d'étape */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24 }}>
+        {Array.from({ length: totalSteps }).map((_, i) => (
           <div key={i} style={{
-            flex: 1, height: 2, borderRadius: 1,
+            flex: 1, height: 3, borderRadius: 2,
             background: i <= step ? C.teal : C.border,
-            transition: 'background 0.3s',
+            transition: 'background 0.2s',
           }} />
         ))}
       </div>
 
+      {/* Étape 0 : Bienvenue + prénom */}
       {step === 0 && (
         <>
-          <p className="hanzi" style={{ fontSize: 56, color: C.teal, margin: '0 0 8px', fontWeight: 300, lineHeight: 1 }}>
-            你好
+          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+            BIENVENUE
           </p>
-          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 24px' }}>NǏ HǍO · BIENVENUE</p>
-
-          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 16px', color: C.text, lineHeight: 1.3 }}>
-            Configurons ton apprentissage en 30 secondes.
+          <p style={{ fontSize: 26, fontWeight: 500, margin: '0 0 12px', color: C.text }}>
+            <span className="hanzi" style={{ color: C.teal }}>你好</span> !
           </p>
-          <p style={{ fontSize: 14, color: C.textDim, margin: '0 0 40px', lineHeight: 1.6 }}>
-            Tu pourras tout changer plus tard dans les paramètres. Pour l'instant, on dégage l'essentiel : qu'est-ce que tu veux travailler ?
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Cette app va t'apprendre le mandarin via 46 leçons construites autour de
+            situations réelles : se présenter, commander au resto, donner un rendez-vous, etc.
+            On va régler 3 choses rapidement.
           </p>
-
-          <button onClick={() => setStep(1)} style={{
-            width: '100%', background: C.teal, color: C.bg, border: 'none',
-            padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
-          }}>COMMENCER →</button>
-        </>
-      )}
-
-      {step === 1 && (
-        <>
-          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>ÉTAPE 2 / 4</p>
-          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
-            Qu'est-ce que tu veux voir ?
-          </p>
-          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 8px', lineHeight: 1.5 }}>
-            Coche tout ce que tu veux apprendre. Les exercices se construisent à partir de ces éléments.
-          </p>
-          <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 24px', lineHeight: 1.5, fontStyle: 'italic' }}>
-            ⓘ Minimum 2 cochés. Si tu décoches "hanzi", tu ne verras jamais de caractères.
-          </p>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-            {interestOptions.map(opt => {
-              const active = selectedInterests.includes(opt.id);
-              return (
-                <button key={opt.id} onClick={() => toggle(opt.id)} style={{
-                  background: active ? `linear-gradient(90deg, ${opt.color}15, transparent)` : C.bgCard,
-                  border: `0.5px solid ${active ? opt.color : C.border}`,
-                  borderLeft: `3px solid ${active ? opt.color : C.border}`,
-                  borderRadius: 0, padding: 14, textAlign: 'left',
-                  display: 'flex', alignItems: 'center', gap: 14,
-                  color: C.text,
-                }}>
-                  <span className="hanzi" style={{
-                    fontSize: 24, color: active ? opt.color : C.textFaint,
-                    minWidth: 36, textAlign: 'center', fontWeight: 300,
-                  }}>{opt.icon}</span>
-                  <div style={{ flex: 1 }}>
-                    <p style={{ fontSize: 14, margin: '0 0 3px', fontWeight: 500 }}>{opt.title}</p>
-                    <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>{opt.desc}</p>
-                  </div>
-                  <span style={{
-                    width: 18, height: 18, borderRadius: 4,
-                    border: `1px solid ${active ? opt.color : C.textFaint}`,
-                    background: active ? opt.color : 'transparent',
-                    color: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 12, fontWeight: 700,
-                  }}>{active ? '✓' : ''}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          <p style={{ fontSize: 11, textAlign: 'center', margin: '0 0 16px',
-            color: canContinue ? C.teal : C.amber }}>
-            {canContinue
-              ? `→ ${facetCount} types d'exercices générés`
-              : '⚠ Coche au moins 2 éléments'}
-          </p>
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => setStep(0)} style={{
-              flex: 1, background: 'transparent', border: `0.5px solid ${C.border}`,
-              color: C.textDim, padding: 14, borderRadius: 8, fontSize: 13,
-            }}>← retour</button>
-            <button
-              onClick={() => setStep(2)}
-              disabled={!canContinue}
-              style={{
-                flex: 2,
-                background: canContinue ? C.teal : C.border,
-                color: canContinue ? C.bg : C.textDim,
-                border: 'none', padding: 14, borderRadius: 8,
-                fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
-              }}
-            >SUIVANT →</button>
-          </div>
-        </>
-      )}
-
-      {step === 2 && (
-        <>
-          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>ÉTAPE 3 / 4</p>
-          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
-            Quel niveau HSK ?
-          </p>
-          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 8px', lineHeight: 1.5 }}>
-            Choisis le ou les niveaux que tu veux étudier. Tu peux les combiner.
-          </p>
-          <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 24px', lineHeight: 1.5, fontStyle: 'italic' }}>
-            ⓘ Conseil : commence par HSK 1 si tu débutes. Tu pourras ajouter HSK 2 et 3 plus tard.
-          </p>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-            {[
-              { id: 'hsk1', label: 'HSK 1', desc: '150 mots — niveau débutant', color: C.teal },
-              { id: 'hsk2', label: 'HSK 2', desc: '150 mots — élémentaire', color: C.purple },
-              { id: 'hsk3', label: 'HSK 3', desc: '285 mots — intermédiaire', color: C.pink },
-            ].map(opt => {
-              const active = selectedHskLevels.includes(opt.id);
-              const wordCount = HSK1_DATA.filter(w => w.tags.includes(opt.id)).length;
-              return (
-                <button
-                  key={opt.id}
-                  onClick={() => {
-                    setSelectedHskLevels(prev =>
-                      prev.includes(opt.id) ? prev.filter(x => x !== opt.id) : [...prev, opt.id]
-                    );
-                  }}
-                  style={{
-                    background: active ? `linear-gradient(90deg, ${opt.color}15, transparent)` : C.bgCard,
-                    border: `0.5px solid ${active ? opt.color : C.border}`,
-                    borderLeft: `3px solid ${active ? opt.color : C.border}`,
-                    borderRadius: 0, padding: 14, textAlign: 'left',
-                    display: 'flex', alignItems: 'center', gap: 14,
-                    color: C.text,
-                  }}>
-                  <span style={{
-                    fontSize: 18, color: active ? opt.color : C.textFaint,
-                    minWidth: 50, textAlign: 'center', fontWeight: 600, letterSpacing: 1,
-                  }}>{opt.label.replace(' ', '')}</span>
-                  <div style={{ flex: 1 }}>
-                    <p style={{ fontSize: 14, margin: '0 0 3px', fontWeight: 500 }}>{opt.label}</p>
-                    <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>{opt.desc}</p>
-                  </div>
-                  <span style={{
-                    width: 18, height: 18, borderRadius: 4,
-                    border: `1px solid ${active ? opt.color : C.textFaint}`,
-                    background: active ? opt.color : 'transparent',
-                    color: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 12, fontWeight: 700,
-                  }}>{active ? '✓' : ''}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {(() => {
-            const totalWords = HSK1_DATA.filter(w => w.tags.some(t => selectedHskLevels.includes(t))).length;
-            return (
-              <p style={{
-                fontSize: 11, textAlign: 'center', margin: '0 0 16px',
-                color: selectedHskLevels.length > 0 ? C.teal : C.amber,
-              }}>
-                {selectedHskLevels.length > 0
-                  ? `→ ${totalWords} mots disponibles`
-                  : '⚠ Choisis au moins un niveau'}
-              </p>
-            );
-          })()}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={() => setStep(1)} style={{
-              flex: 1, background: 'transparent', border: `0.5px solid ${C.border}`,
-              color: C.textDim, padding: 14, borderRadius: 8, fontSize: 13,
-            }}>← retour</button>
-            <button
-              onClick={() => setStep(3)}
-              disabled={selectedHskLevels.length === 0}
-              style={{
-                flex: 2,
-                background: selectedHskLevels.length > 0 ? C.teal : C.border,
-                color: selectedHskLevels.length > 0 ? C.bg : C.textDim,
-                border: 'none', padding: 14, borderRadius: 8,
-                fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
-              }}
-            >SUIVANT →</button>
-          </div>
-        </>
-      )}
-
-      {step === 3 && (
-        <>
-          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>ÉTAPE 4 / 4</p>
-          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
-            Ton rythme
-          </p>
-          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.5 }}>
-            Combien de cartes par session ? Quelle proportion de nouveaux mots ?
-          </p>
-
-          <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>
-            CARTES PAR SESSION : <span style={{ color: C.teal, fontSize: 14, fontWeight: 600, letterSpacing: 0 }}>{sessionSize}</span>
+          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 1, margin: '0 0 8px' }}>
+            COMMENT TU T'APPELLES ?
           </p>
           <input
-            type="range" min="5" max="40" value={sessionSize}
-            onChange={e => setSessionSize(parseInt(e.target.value))}
-            style={{ width: '100%', marginBottom: 8, accentColor: C.teal }}
-          />
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: C.textFaint, marginBottom: 24 }}>
-            <span>court (5min)</span>
-            <span>long (20min)</span>
-          </div>
-
-          <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>
-            NOUVEAUX MOTS : <span style={{ color: C.purple, fontSize: 14, fontWeight: 600, letterSpacing: 0 }}>{Math.round(newRatio * 100)}%</span>
-          </p>
-          <input
-            type="range" min="0" max="100" value={newRatio * 100}
-            onChange={e => setNewRatio(parseInt(e.target.value) / 100)}
-            style={{ width: '100%', marginBottom: 8, accentColor: C.purple }}
-          />
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: C.textFaint, marginBottom: 24 }}>
-            <span>tout réviser</span>
-            <span>tout nouveau</span>
-          </div>
-
-          <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>NOM DE TON PROFIL</p>
-          <input
-            value={profileName}
-            onChange={e => setProfileName(e.target.value)}
+            type="text" value={profileName} onChange={e => setProfileName(e.target.value)}
+            placeholder="Ton prénom"
+            autoFocus
             style={{
-              width: '100%', background: C.bgCard, border: `0.5px solid ${C.border}`,
-              color: C.text, padding: 12, borderRadius: 8, fontSize: 14, marginBottom: 28,
+              width: '100%', boxSizing: 'border-box',
+              background: C.bgCard, border: `0.5px solid ${C.border}`, color: C.text,
+              padding: 14, borderRadius: 8, fontSize: 16, marginBottom: 24,
             }}
           />
+          <button onClick={() => setStep(1)} disabled={!profileName.trim()} style={{
+            width: '100%',
+            background: profileName.trim() ? C.teal : C.border,
+            color: profileName.trim() ? C.bg : C.textDim,
+            border: 'none', padding: 14, borderRadius: 8,
+            fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>SUIVANT →</button>
+        </>
+      )}
+
+      {/* Étape 1 : Audio on/off */}
+      {step === 1 && (
+        <>
+          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+            AUDIO
+          </p>
+          <p style={{ fontSize: 24, fontWeight: 500, margin: '0 0 12px', color: C.text }}>
+            Tu veux entendre les mots ?
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            La prononciation t'aide à mémoriser et à reconnaître les sons.
+            Tu peux désactiver si tu fais des sessions silencieuses.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+            <button onClick={() => setAudioEnabled(true)} style={{
+              background: audioEnabled ? 'rgba(45,212,191,0.08)' : C.bgCard,
+              border: `0.5px solid ${audioEnabled ? C.teal : C.border}`,
+              borderLeft: `2px solid ${audioEnabled ? C.teal : C.border}`,
+              color: C.text, padding: 14, borderRadius: 0, textAlign: 'left',
+            }}>
+              <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500 }}>♪ Audio activé</p>
+              <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>Recommandé — meilleure mémorisation</p>
+            </button>
+            <button onClick={() => setAudioEnabled(false)} style={{
+              background: !audioEnabled ? 'rgba(239,68,68,0.06)' : C.bgCard,
+              border: `0.5px solid ${!audioEnabled ? C.red : C.border}`,
+              borderLeft: `2px solid ${!audioEnabled ? C.red : C.border}`,
+              color: C.text, padding: 14, borderRadius: 0, textAlign: 'left',
+            }}>
+              <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500 }}>○ Silencieux</p>
+              <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>Sessions sans son (transports, lieux publics)</p>
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => setStep(0)} style={{
+              background: 'transparent', border: `0.5px solid ${C.border}`, color: C.textDim,
+              padding: 14, borderRadius: 8, fontSize: 13, flex: 1,
+            }}>← RETOUR</button>
+            <button onClick={() => setStep(2)} style={{
+              background: C.teal, color: C.bg, border: 'none',
+              padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, flex: 2,
+            }}>SUIVANT →</button>
+          </div>
+        </>
+      )}
+
+      {/* Étape 2 : Tons pinyin */}
+      {step === 2 && (
+        <>
+          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+            PINYIN
+          </p>
+          <p style={{ fontSize: 24, fontWeight: 500, margin: '0 0 12px', color: C.text }}>
+            Avec ou sans tons ?
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Les tons (les accents sur les voyelles) sont essentiels en mandarin.
+            Les afficher t'aide à les apprendre. Sans tons = mode débutant ultra-soft.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+            <button onClick={() => setPinyinTones(true)} style={{
+              background: pinyinTones ? 'rgba(168,85,247,0.06)' : C.bgCard,
+              border: `0.5px solid ${pinyinTones ? C.purple : C.border}`,
+              borderLeft: `2px solid ${pinyinTones ? C.purple : C.border}`,
+              color: C.text, padding: 14, borderRadius: 0, textAlign: 'left',
+            }}>
+              <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, fontFamily: 'monospace' }}>
+                wǒ shì fǎguó rén
+              </p>
+              <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>Avec tons (recommandé)</p>
+            </button>
+            <button onClick={() => setPinyinTones(false)} style={{
+              background: !pinyinTones ? 'rgba(251,191,36,0.06)' : C.bgCard,
+              border: `0.5px solid ${!pinyinTones ? C.amber : C.border}`,
+              borderLeft: `2px solid ${!pinyinTones ? C.amber : C.border}`,
+              color: C.text, padding: 14, borderRadius: 0, textAlign: 'left',
+            }}>
+              <p style={{ margin: '0 0 4px', fontSize: 14, fontWeight: 500, fontFamily: 'monospace' }}>
+                wo shi faguo ren
+              </p>
+              <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>Sans tons (plus simple à taper)</p>
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => setStep(1)} style={{
+              background: 'transparent', border: `0.5px solid ${C.border}`, color: C.textDim,
+              padding: 14, borderRadius: 8, fontSize: 13, flex: 1,
+            }}>← RETOUR</button>
+            <button onClick={() => setStep(3)} style={{
+              background: C.teal, color: C.bg, border: 'none',
+              padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, flex: 2,
+            }}>SUIVANT →</button>
+          </div>
+        </>
+      )}
+
+      {/* Étape 3 : Durée session + GO */}
+      {step === 3 && (
+        <>
+          <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+            DURÉE
+          </p>
+          <p style={{ fontSize: 24, fontWeight: 500, margin: '0 0 12px', color: C.text }}>
+            Combien d'exos par session ?
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Pour les modes libres (flashcards, QCM rapides). Les leçons ont leur
+            propre rythme — tu termines une phase quand tous les mots sont validés.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
+            {[
+              { val: 10, lbl: '10 exos', desc: '~3 min' },
+              { val: 15, lbl: '15 exos', desc: '~5 min — recommandé' },
+              { val: 20, lbl: '20 exos', desc: '~7 min' },
+              { val: 30, lbl: '30 exos', desc: '~10 min' },
+            ].map(opt => {
+              const active = sessionSize === opt.val;
+              return (
+                <button key={opt.val} onClick={() => setSessionSize(opt.val)} style={{
+                  background: active ? 'rgba(45,212,191,0.08)' : C.bgCard,
+                  border: `0.5px solid ${active ? C.teal : C.border}`,
+                  borderLeft: `2px solid ${active ? C.teal : C.border}`,
+                  color: C.text, padding: 12, borderRadius: 0, textAlign: 'center',
+                }}>
+                  <p style={{ margin: '0 0 2px', fontSize: 13, fontWeight: 500 }}>{opt.lbl}</p>
+                  <p style={{ fontSize: 10, color: C.textDim, margin: 0 }}>{opt.desc}</p>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 8, padding: 14, marginBottom: 20,
+          }}>
+            <p style={{ fontSize: 11, color: C.teal, letterSpacing: 1, margin: '0 0 4px' }}>
+              ✓ TOUT EST RÉGLÉ
+            </p>
+            <p style={{ fontSize: 13, color: C.text, margin: 0, lineHeight: 1.5 }}>
+              Hello {profileName} ! Audio {audioEnabled ? 'on' : 'off'},
+              pinyin {pinyinTones ? 'avec tons' : 'sans tons'}, sessions de {sessionSize} exos.
+            </p>
+          </div>
 
           <div style={{ display: 'flex', gap: 8 }}>
             <button onClick={() => setStep(2)} style={{
-              flex: 1, background: 'transparent', border: `0.5px solid ${C.border}`,
-              color: C.textDim, padding: 14, borderRadius: 8, fontSize: 13,
-            }}>← retour</button>
-            <button onClick={finish} style={{
-              flex: 2, background: C.teal, color: C.bg, border: 'none',
-              padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+              background: 'transparent', border: `0.5px solid ${C.border}`, color: C.textDim,
+              padding: 14, borderRadius: 8, fontSize: 13, flex: 1,
+            }}>← RETOUR</button>
+            <button onClick={handleComplete} style={{
+              background: C.teal, color: C.bg, border: 'none',
+              padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, flex: 2,
+              letterSpacing: 0.5,
             }}>C'EST PARTI →</button>
           </div>
         </>
@@ -2651,8 +2762,7 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
   const [currentTarget, setCurrentTarget] = useState(null);
 
   // Récupérer le pool de mots du profil
-  const levels = profile.hskLevels || ['hsk1'];
-  const pool = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+  const pool = HSK1_DATA;
 
   // Mots déjà rencontrés (utilisés comme contexte connu pour Claude)
   const knownWords = useMemo(() => {
@@ -2712,7 +2822,7 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
     const target = (candidates.length > 0 ? candidates : pool)[Math.floor(Math.random() * (candidates.length > 0 ? candidates.length : pool.length))];
     setCurrentTarget(target);
 
-    const hskNum = levels.includes('hsk3') ? 3 : levels.includes('hsk2') ? 2 : 1;
+    const hskNum = 2; // Niveau par défaut maintenant (plus de filtre HSK utilisateur)
 
     try {
       const result = await api.generateSentence({
@@ -2905,9 +3015,7 @@ function ReadingScreen({ profile, learnerState, onBack }) {
   const [answers, setAnswers] = useState({}); // { qIdx: selectedIdx }
   const [revealed, setRevealed] = useState(false); // afficher la traduction française
   const [showPinyin, setShowPinyin] = useState(false);
-
-  const levels = profile.hskLevels || ['hsk1'];
-  const pool = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
+  const pool = HSK1_DATA;
 
   const knownWords = useMemo(() => {
     const seen = new Set();
@@ -2951,7 +3059,7 @@ function ReadingScreen({ profile, learnerState, onBack }) {
       return;
     }
 
-    const hskNum = levels.includes('hsk3') ? 3 : levels.includes('hsk2') ? 2 : 1;
+    const hskNum = 2; // Niveau par défaut maintenant (plus de filtre HSK utilisateur)
 
     try {
       const result = await api.generateText({
@@ -3212,14 +3320,12 @@ function SentenceBuilderScreen({ profile, onBack }) {
   const [feedback, setFeedback] = useState(null); // 'correct' | 'wrong' | null
   const [stats, setStats] = useState({ done: 0, correct: 0 });
 
-  const levels = profile.hskLevels || ['hsk1'];
-
-  // Filtrer les phrases selon les niveaux activés et mélanger
+  // Toutes les phrases sont disponibles maintenant (plus de filtre HSK)
   useEffect(() => {
-    const filtered = SENTENCE_BANK.filter(s => levels.includes(s.hsk));
+    const filtered = SENTENCE_BANK;
     const shuffled = [...filtered].sort(() => Math.random() - 0.5);
     setPool(shuffled);
-  }, [levels.join(',')]);
+  }, []);
 
   const current = pool[currentIdx];
 
@@ -3439,63 +3545,45 @@ function SentenceBuilderScreen({ profile, onBack }) {
 }
 
 
+// ============================================================
+// PACK OFFLINE — pré-télécharger les textes Phase 5 par leçon
+// (plus l'ancien système sentences/texts/dialogues)
+// ============================================================
 function PackDownloadScreen({ profile, learnerState, onBack }) {
   const isOnline = useOnlineStatus();
-  const [sentenceCount, setSentenceCount] = useState(50);
-  const [textCount, setTextCount] = useState(20);
-  const [dialogueCount, setDialogueCount] = useState(10);
-  const [includeSentences, setIncludeSentences] = useState(true);
-  const [includeTexts, setIncludeTexts] = useState(true);
-  const [includeDialogues, setIncludeDialogues] = useState(false);
-
   const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0, type: '' });
+  const [progress, setProgress] = useState({ current: 0, total: 0, currentLesson: '' });
   const [errors, setErrors] = useState([]);
   const [completed, setCompleted] = useState(false);
   const cancelRef = useRef(false);
 
-  // État courant du pack en stock
-  const [packStats, setPackStats] = useState(countTotal());
-  const [available, setAvailable] = useState(countAvailable());
+  // Quels textes Phase 5 sont déjà téléchargés ?
+  const [downloadedTexts, setDownloadedTexts] = useState({});
 
-  const refreshStats = () => {
-    setPackStats(countTotal());
-    setAvailable(countAvailable());
+  const refreshDownloaded = () => {
+    if (typeof localStorage === 'undefined') return;
+    const map = {};
+    try {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith('hsk_phase5_')) {
+          const lessonId = key.replace('hsk_phase5_', '');
+          map[lessonId] = true;
+        }
+      }
+    } catch {}
+    setDownloadedTexts(map);
   };
 
-  useEffect(() => { refreshStats(); }, []);
+  useEffect(() => { refreshDownloaded(); }, []);
 
-  const levels = profile.hskLevels || ['hsk1'];
-  const pool = HSK1_DATA.filter(w => w.tags.some(t => levels.includes(t)));
-  const hskNum = levels.includes('hsk3') ? 3 : levels.includes('hsk2') ? 2 : 1;
+  const allLessons = useMemo(() => getAllLessons(), []);
+  const downloadedCount = Object.keys(downloadedTexts).length;
+  const totalLessons = allLessons.length;
+  const remaining = totalLessons - downloadedCount;
 
-  // Construire la liste des mots connus pour donner du contexte à Claude
-  const knownWords = useMemo(() => {
-    const seen = new Set();
-    for (const item of pool) {
-      const anyTouched = ['hanzi_to_sens', 'sens_to_hanzi', 'pinyin_to_sens', 'sens_to_pinyin', 'hanzi_to_pinyin', 'pinyin_to_hanzi']
-        .some(f => {
-          const state = learnerState[`${item.id}_${f}`];
-          return state && state.reps > 0;
-        });
-      if (anyTouched) seen.add(item.hanzi);
-    }
-    if (seen.size < 15) pool.slice(0, 30).forEach(w => seen.add(w.hanzi));
-    return Array.from(seen);
-  }, []);
-
-  const totalRequested =
-    (includeSentences ? sentenceCount : 0) +
-    (includeTexts ? textCount : 0) +
-    (includeDialogues ? dialogueCount : 0);
-
-  const startDownload = async () => {
+  const downloadAllTexts = async () => {
     if (!isOnline) {
       setErrors(['Tu dois être connecté à internet pour télécharger.']);
-      return;
-    }
-    if (totalRequested === 0) {
-      setErrors(['Choisis au moins un type d\'exercice.']);
       return;
     }
     setDownloading(true);
@@ -3503,376 +3591,280 @@ function PackDownloadScreen({ profile, learnerState, onBack }) {
     setCompleted(false);
     cancelRef.current = false;
 
-    let done = 0;
-    const total = totalRequested;
-    setProgress({ current: 0, total, type: 'init' });
+    const toDownload = allLessons.filter(l => !downloadedTexts[l.id]);
+    setProgress({ current: 0, total: toDownload.length, currentLesson: '' });
 
-    // ===== Phase 1 : phrases =====
-    if (includeSentences) {
-      for (let i = 0; i < sentenceCount; i++) {
-        if (cancelRef.current) break;
-        const target = pool[Math.floor(Math.random() * pool.length)];
-        try {
-          const result = await api.generateSentence({
-            known_words: knownWords.slice(0, 60),
-            target_word: { hanzi: target.hanzi, pinyin: target.pinyin, fr: target.fr },
-            hsk_level: hskNum,
-            format: 'qcm',
-            answer_in: 'fr',
-          });
-          addToPack('sentences', { ...result, target_word: target });
-          done++;
-          setProgress({ current: done, total, type: 'sentences' });
-        } catch (e) {
-          setErrors(prev => [...prev, `Phrase ${i + 1}: ${e.message.slice(0, 80)}`]);
-        }
-        // Petit délai pour éviter rate-limiting
-        await new Promise(r => setTimeout(r, 200));
-      }
-    }
+    let success = 0;
+    const localErrors = [];
 
-    // ===== Phase 2 : textes =====
-    if (includeTexts && !cancelRef.current) {
-      for (let i = 0; i < textCount; i++) {
-        if (cancelRef.current) break;
-        try {
-          const result = await api.generateText({
-            known_words: knownWords.slice(0, 80),
-            hsk_level: hskNum,
+    for (let i = 0; i < toDownload.length; i++) {
+      if (cancelRef.current) break;
+      const lesson = toDownload[i];
+      setProgress({ current: i, total: toDownload.length, currentLesson: lesson.theme });
+
+      try {
+        const words = lesson.word_ids.map(id => getWordById(id)).filter(Boolean);
+        const wordList = words.map(w => `${w.hanzi}(${w.pinyin}, ${w.fr})`).join(', ');
+
+        const resp = await fetch('https://hsk-backend.tom-delaine14.workers.dev/generate-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            known_words: words.map(w => w.hanzi),
+            hsk_level: 2,
+            theme: `${lesson.theme} — utilise les mots suivants : ${wordList}`,
             length: 'short',
-            question_count: 2,
-          });
-          addToPack('texts', result);
-          done++;
-          setProgress({ current: done, total, type: 'texts' });
-        } catch (e) {
-          setErrors(prev => [...prev, `Texte ${i + 1}: ${e.message.slice(0, 80)}`]);
-        }
-        await new Promise(r => setTimeout(r, 250));
+            question_count: 3,
+          }),
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (!data.text_zh) throw new Error('Réponse incomplète');
+
+        localStorage.setItem(`hsk_phase5_${lesson.id}`, JSON.stringify(data));
+        success++;
+
+        // Petite pause entre les requêtes pour ne pas spammer
+        await new Promise(r => setTimeout(r, 300));
+      } catch (e) {
+        console.warn(`Failed for ${lesson.id}:`, e);
+        localErrors.push(`${lesson.theme}: ${e.message}`);
       }
     }
 
-    // ===== Phase 3 : dialogues (= phrases d'amorce conversationnelles) =====
-    if (includeDialogues && !cancelRef.current) {
-      for (let i = 0; i < dialogueCount; i++) {
-        if (cancelRef.current) break;
-        // On utilise generate-sentence avec un format conversationnel
-        const target = pool[Math.floor(Math.random() * pool.length)];
-        try {
-          const result = await api.generateSentence({
-            known_words: knownWords.slice(0, 60),
-            target_word: { hanzi: target.hanzi, pinyin: target.pinyin, fr: target.fr },
-            hsk_level: hskNum,
-            format: 'translation', // demande à traduire — plus actif
-            answer_in: 'fr',
-          });
-          addToPack('dialogues', { ...result, target_word: target });
-          done++;
-          setProgress({ current: done, total, type: 'dialogues' });
-        } catch (e) {
-          setErrors(prev => [...prev, `Dialogue ${i + 1}: ${e.message.slice(0, 80)}`]);
-        }
-        await new Promise(r => setTimeout(r, 200));
-      }
+    setErrors(localErrors);
+    setCompleted(true);
+    setDownloading(false);
+    refreshDownloaded();
+  };
+
+  const downloadOne = async (lesson) => {
+    if (!isOnline || downloading) return;
+    setDownloading(true);
+    setErrors([]);
+    setProgress({ current: 0, total: 1, currentLesson: lesson.theme });
+
+    try {
+      const words = lesson.word_ids.map(id => getWordById(id)).filter(Boolean);
+      const wordList = words.map(w => `${w.hanzi}(${w.pinyin}, ${w.fr})`).join(', ');
+
+      const resp = await fetch('https://hsk-backend.tom-delaine14.workers.dev/generate-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          known_words: words.map(w => w.hanzi),
+          hsk_level: 2,
+          theme: `${lesson.theme} — utilise les mots suivants : ${wordList}`,
+          length: 'short',
+          question_count: 3,
+        }),
+      });
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      if (!data.text_zh) throw new Error('Réponse incomplète');
+
+      localStorage.setItem(`hsk_phase5_${lesson.id}`, JSON.stringify(data));
+    } catch (e) {
+      setErrors([`${lesson.theme}: ${e.message}`]);
     }
 
     setDownloading(false);
-    setCompleted(!cancelRef.current);
-    refreshStats();
+    refreshDownloaded();
   };
 
-  const handleCancel = () => {
-    cancelRef.current = true;
+  const deleteOne = (lesson) => {
+    if (downloading) return;
+    if (!confirm(`Supprimer le texte téléchargé pour "${lesson.theme}" ?`)) return;
+    try { localStorage.removeItem(`hsk_phase5_${lesson.id}`); } catch {}
+    refreshDownloaded();
   };
 
-  const handleClear = () => {
-    if (confirm('Effacer TOUT le pack offline ? Tu pourras le re-télécharger plus tard.')) {
-      clearPack();
-      refreshStats();
-    }
+  const deleteAll = () => {
+    if (downloading) return;
+    if (!confirm('Supprimer TOUS les textes Phase 5 téléchargés ?')) return;
+    try {
+      for (const key of Object.keys(localStorage)) {
+        if (key.startsWith('hsk_phase5_')) localStorage.removeItem(key);
+      }
+    } catch {}
+    refreshDownloaded();
   };
-
-  const eta = downloading
-    ? Math.round(((progress.total - progress.current) * 2.5) / 60)
-    : 0;
 
   return (
     <div className="slide-up">
-      <button onClick={onBack} disabled={downloading} style={{
-        background: 'transparent', border: 'none', color: downloading ? C.textFaint : C.teal,
-        fontSize: 13, padding: 0, marginBottom: 16,
+      <button onClick={onBack} style={{
+        background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
       }}>← retour</button>
 
-      <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>PACK OFFLINE</p>
+      <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>📥 PACK OFFLINE</p>
       <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
-        Pré-charger des exos
+        Textes Phase 5
       </p>
-      <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.5 }}>
-        Génère un stock d'exercices que tu pourras utiliser hors-ligne (avion, métro, etc.).
+      <p style={{ fontSize: 12, color: C.textDim, margin: '0 0 20px', lineHeight: 1.5 }}>
+        Pré-charge les textes IA de chaque leçon pour pouvoir les lire offline.
+        Chaque téléchargement utilise une requête au service IA (~5 sec).
       </p>
 
-      {/* État du pack actuel */}
+      {/* État global */}
       <div style={{
-        background: C.bgCard, border: `0.5px solid ${C.border}`,
-        borderLeft: `2px solid ${available.total > 0 ? C.teal : C.textFaint}`,
-        padding: 14, marginBottom: 24,
+        background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
+        border: `0.5px solid ${C.borderAccent}`,
+        borderRadius: 12, padding: 16, marginBottom: 20,
       }}>
-        <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 8px' }}>STOCK ACTUEL</p>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <span style={{ fontSize: 24, color: C.text, fontWeight: 500 }}>{available.total}</span>
-          <span style={{ fontSize: 11, color: C.textDim }}>exos dispo</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+          <span style={{ fontSize: 12, color: C.textDim, letterSpacing: 1 }}>TÉLÉCHARGÉS</span>
+          <span style={{ fontSize: 18, color: C.teal, fontWeight: 500 }}>
+            {downloadedCount} / {totalLessons}
+          </span>
         </div>
-        {available.total > 0 && (
-          <p style={{ fontSize: 10, color: C.textDim, margin: '6px 0 0' }}>
-            {available.sentences > 0 && `${available.sentences} phrases · `}
-            {available.texts > 0 && `${available.texts} textes · `}
-            {available.dialogues > 0 && `${available.dialogues} dialogues`}
-          </p>
-        )}
-        {(packStats.sentences + packStats.texts + packStats.dialogues) > available.total && (
-          <p style={{ fontSize: 10, color: C.textFaint, margin: '4px 0 0', fontStyle: 'italic' }}>
-            ({(packStats.sentences + packStats.texts + packStats.dialogues) - available.total} déjà utilisés, gardés en archive)
-          </p>
-        )}
+        <div style={{ height: 4, background: C.border, borderRadius: 2, overflow: 'hidden' }}>
+          <div style={{
+            width: `${totalLessons > 0 ? (downloadedCount / totalLessons) * 100 : 0}%`,
+            height: '100%',
+            background: `linear-gradient(90deg, ${C.teal}, ${C.purple})`,
+            transition: 'width 0.3s',
+          }} />
+        </div>
       </div>
 
-      {/* Pendant le téléchargement */}
+      {/* Statut online */}
+      {!isOnline && (
+        <div style={{
+          padding: 12, background: 'rgba(239,68,68,0.06)',
+          border: `0.5px solid ${C.red}`, borderRadius: 8, marginBottom: 16,
+        }}>
+          <p style={{ fontSize: 12, color: C.red, margin: 0 }}>
+            ⚠ Tu es offline. Reviens en ligne pour télécharger.
+          </p>
+        </div>
+      )}
+
+      {/* Bouton tout télécharger */}
+      {!downloading && remaining > 0 && (
+        <button onClick={downloadAllTexts} disabled={!isOnline} style={{
+          width: '100%',
+          background: isOnline ? C.teal : C.border,
+          color: isOnline ? C.bg : C.textDim,
+          border: 'none', padding: 14, borderRadius: 8,
+          fontWeight: 600, fontSize: 13, letterSpacing: 0.5, marginBottom: 8,
+        }}>
+          ↓ TÉLÉCHARGER TOUT ({remaining} restant{remaining > 1 ? 's' : ''})
+        </button>
+      )}
+
+      {/* Bouton tout supprimer */}
+      {!downloading && downloadedCount > 0 && (
+        <button onClick={deleteAll} style={{
+          width: '100%', background: 'transparent',
+          border: `0.5px solid ${C.red}`, color: C.red,
+          padding: 10, borderRadius: 8, fontSize: 11, letterSpacing: 1, marginBottom: 16,
+        }}>
+          ⚠ SUPPRIMER TOUS LES TÉLÉCHARGEMENTS
+        </button>
+      )}
+
+      {/* Progress bar pendant téléchargement */}
       {downloading && (
         <div style={{
-          background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
-          border: `0.5px solid ${C.teal}`,
-          borderRadius: 12, padding: 18, marginBottom: 20,
+          background: C.bgCard, border: `0.5px solid ${C.amber}`,
+          borderRadius: 8, padding: 14, marginBottom: 16,
         }}>
-          <p style={{ fontSize: 10, color: C.teal, letterSpacing: 2, margin: '0 0 10px' }}>
-            TÉLÉCHARGEMENT EN COURS · {progress.type.toUpperCase()}
+          <p style={{ fontSize: 11, color: C.amber, letterSpacing: 1, margin: '0 0 6px' }}>
+            ⟳ TÉLÉCHARGEMENT EN COURS
           </p>
-          <p style={{ fontSize: 26, color: C.text, margin: '0 0 12px', fontWeight: 500 }}>
-            {progress.current} / {progress.total}
+          <p style={{ fontSize: 13, color: C.text, margin: '0 0 10px' }}>
+            {progress.currentLesson}
           </p>
-          <div style={{ height: 4, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 12 }}>
+          <div style={{ height: 3, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 8 }}>
             <div style={{
-              width: `${(progress.current / progress.total) * 100}%`,
+              width: progress.total > 0 ? `${(progress.current / progress.total) * 100}%` : '0%',
               height: '100%',
-              background: `linear-gradient(90deg, ${C.teal}, ${C.purple})`,
+              background: `linear-gradient(90deg, ${C.amber}, ${C.teal})`,
               transition: 'width 0.3s',
             }} />
           </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: C.textDim, marginBottom: 14 }}>
-            <span>{Math.round((progress.current / progress.total) * 100)}%</span>
-            {eta > 0 && <span>~{eta} min restantes</span>}
-          </div>
-          <button onClick={handleCancel} style={{
-            width: '100%', background: 'transparent', border: `0.5px solid ${C.amber}`,
-            color: C.amber, padding: 10, borderRadius: 8, fontSize: 12, letterSpacing: 1,
-          }}>⏸ ANNULER</button>
+          <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
+            {progress.current + 1} / {progress.total}
+          </p>
+          <button onClick={() => { cancelRef.current = true; }} style={{
+            marginTop: 10, background: 'transparent',
+            border: `0.5px solid ${C.red}`, color: C.red,
+            padding: '6px 12px', borderRadius: 6, fontSize: 11, letterSpacing: 1,
+          }}>ANNULER</button>
         </div>
       )}
 
-      {/* Message de fin */}
-      {completed && !downloading && (
-        <div style={{
-          background: 'rgba(45,212,191,0.08)', border: `0.5px solid ${C.teal}`,
-          padding: 14, marginBottom: 20, borderRadius: 8,
-        }}>
-          <p style={{ fontSize: 13, color: C.teal, margin: '0 0 4px', fontWeight: 500 }}>
-            ✓ Pack téléchargé
-          </p>
-          <p style={{ fontSize: 12, color: C.text, margin: 0, lineHeight: 1.5 }}>
-            {progress.current} exercices ajoutés. Tu peux les utiliser maintenant même sans réseau.
-          </p>
-        </div>
-      )}
-
-      {/* Erreurs éventuelles */}
+      {/* Erreurs */}
       {errors.length > 0 && !downloading && (
         <div style={{
-          background: 'rgba(251,191,36,0.06)', border: `0.5px solid ${C.amber}`,
-          borderLeft: `2px solid ${C.amber}`, padding: 12, marginBottom: 16,
+          padding: 12, background: 'rgba(239,68,68,0.06)',
+          border: `0.5px solid ${C.red}`, borderRadius: 8, marginBottom: 16,
         }}>
-          <p style={{ fontSize: 11, color: C.amber, letterSpacing: 1, margin: '0 0 6px' }}>
-            {errors.length} erreur{errors.length > 1 ? 's' : ''}
+          <p style={{ fontSize: 11, color: C.red, margin: '0 0 6px' }}>
+            {errors.length} erreur{errors.length > 1 ? 's' : ''} :
           </p>
-          {errors.slice(0, 3).map((e, i) => (
-            <p key={i} style={{ fontSize: 11, color: C.textDim, margin: '4px 0', lineHeight: 1.4 }}>{e}</p>
+          {errors.slice(0, 5).map((err, i) => (
+            <p key={i} style={{ fontSize: 11, color: C.textDim, margin: '0 0 2px' }}>
+              {err}
+            </p>
           ))}
-          {errors.length > 3 && (
+          {errors.length > 5 && (
             <p style={{ fontSize: 11, color: C.textFaint, margin: '4px 0 0', fontStyle: 'italic' }}>
-              + {errors.length - 3} autres
+              ... et {errors.length - 5} autres
             </p>
           )}
         </div>
       )}
 
-      {/* Form de configuration */}
-      {!downloading && (
-        <>
-          <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 12px' }}>
-            CONFIGURATION
-          </p>
-
-          {/* Phrases */}
-          <div style={{
-            background: C.bgCard, border: `0.5px solid ${includeSentences ? C.teal : C.border}`,
-            borderLeft: `2px solid ${includeSentences ? C.teal : C.border}`,
-            padding: 14, marginBottom: 8,
-          }}>
-            <button onClick={() => setIncludeSentences(!includeSentences)} style={{
-              background: 'transparent', border: 'none', color: C.text, padding: 0,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
-              marginBottom: includeSentences ? 12 : 0,
+      {/* Liste des leçons */}
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>
+        DÉTAIL PAR LEÇON
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 16 }}>
+        {allLessons.map(lesson => {
+          const isDl = !!downloadedTexts[lesson.id];
+          return (
+            <div key={lesson.id} style={{
+              background: C.bgCard,
+              border: `0.5px solid ${isDl ? C.teal : C.border}`,
+              borderLeft: `2px solid ${isDl ? C.teal : C.border}`,
+              padding: 10, display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              <div style={{ textAlign: 'left' }}>
-                <p style={{ fontSize: 14, margin: '0 0 2px', fontWeight: 500 }}>Phrases IA</p>
-                <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-                  Phrase + QCM traduction
+              <span style={{ color: isDl ? C.teal : C.textFaint, fontSize: 14, minWidth: 18 }}>
+                {isDl ? '✓' : '○'}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontSize: 12, margin: '0 0 1px', color: C.text }}>
+                  {lesson.theme}
+                </p>
+                <p style={{ fontSize: 9, color: C.textDim, margin: 0 }}>
+                  {lesson.chapter}
                 </p>
               </div>
-              <span style={{
-                width: 18, height: 18, borderRadius: 4,
-                border: `1px solid ${includeSentences ? C.teal : C.textFaint}`,
-                background: includeSentences ? C.teal : 'transparent',
-                color: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 12, fontWeight: 700,
-              }}>{includeSentences ? '✓' : ''}</span>
-            </button>
-            {includeSentences && (
-              <>
-                <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 6px' }}>
-                  QUANTITÉ : <span style={{ color: C.teal, fontWeight: 600 }}>{sentenceCount}</span>
-                </p>
-                <input type="range" min="10" max="200" step="10" value={sentenceCount}
-                  onChange={e => setSentenceCount(parseInt(e.target.value))}
-                  style={{ width: '100%', accentColor: C.teal }}
-                />
-              </>
-            )}
-          </div>
-
-          {/* Textes */}
-          <div style={{
-            background: C.bgCard, border: `0.5px solid ${includeTexts ? C.pink : C.border}`,
-            borderLeft: `2px solid ${includeTexts ? C.pink : C.border}`,
-            padding: 14, marginBottom: 8,
-          }}>
-            <button onClick={() => setIncludeTexts(!includeTexts)} style={{
-              background: 'transparent', border: 'none', color: C.text, padding: 0,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
-              marginBottom: includeTexts ? 12 : 0,
-            }}>
-              <div style={{ textAlign: 'left' }}>
-                <p style={{ fontSize: 14, margin: '0 0 2px', fontWeight: 500 }}>Textes de lecture</p>
-                <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-                  Texte + 2 questions de compréhension
-                </p>
-              </div>
-              <span style={{
-                width: 18, height: 18, borderRadius: 4,
-                border: `1px solid ${includeTexts ? C.pink : C.textFaint}`,
-                background: includeTexts ? C.pink : 'transparent',
-                color: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 12, fontWeight: 700,
-              }}>{includeTexts ? '✓' : ''}</span>
-            </button>
-            {includeTexts && (
-              <>
-                <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 6px' }}>
-                  QUANTITÉ : <span style={{ color: C.pink, fontWeight: 600 }}>{textCount}</span>
-                </p>
-                <input type="range" min="5" max="100" step="5" value={textCount}
-                  onChange={e => setTextCount(parseInt(e.target.value))}
-                  style={{ width: '100%', accentColor: C.pink }}
-                />
-              </>
-            )}
-          </div>
-
-          {/* Dialogues */}
-          <div style={{
-            background: C.bgCard, border: `0.5px solid ${includeDialogues ? C.purple : C.border}`,
-            borderLeft: `2px solid ${includeDialogues ? C.purple : C.border}`,
-            padding: 14, marginBottom: 16,
-          }}>
-            <button onClick={() => setIncludeDialogues(!includeDialogues)} style={{
-              background: 'transparent', border: 'none', color: C.text, padding: 0,
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%',
-              marginBottom: includeDialogues ? 12 : 0,
-            }}>
-              <div style={{ textAlign: 'left' }}>
-                <p style={{ fontSize: 14, margin: '0 0 2px', fontWeight: 500 }}>Dialogues</p>
-                <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-                  Phrases conversationnelles à traduire
-                </p>
-              </div>
-              <span style={{
-                width: 18, height: 18, borderRadius: 4,
-                border: `1px solid ${includeDialogues ? C.purple : C.textFaint}`,
-                background: includeDialogues ? C.purple : 'transparent',
-                color: C.bg, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 12, fontWeight: 700,
-              }}>{includeDialogues ? '✓' : ''}</span>
-            </button>
-            {includeDialogues && (
-              <>
-                <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 6px' }}>
-                  QUANTITÉ : <span style={{ color: C.purple, fontWeight: 600 }}>{dialogueCount}</span>
-                </p>
-                <input type="range" min="5" max="50" step="5" value={dialogueCount}
-                  onChange={e => setDialogueCount(parseInt(e.target.value))}
-                  style={{ width: '100%', accentColor: C.purple }}
-                />
-              </>
-            )}
-          </div>
-
-          {/* Récap + bouton lancer */}
-          <div style={{
-            background: 'linear-gradient(135deg, rgba(45,212,191,0.05), rgba(168,85,247,0.03))',
-            border: `0.5px solid ${C.borderAccent}`,
-            padding: 14, marginBottom: 16, borderRadius: 8,
-          }}>
-            <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 1, margin: '0 0 8px' }}>RÉCAP</p>
-            <p style={{ fontSize: 14, color: C.text, margin: '0 0 4px' }}>
-              {totalRequested} exercices à générer
-            </p>
-            <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-              ~{Math.round(totalRequested * 2.5 / 60)} min · ~${(totalRequested * 0.003).toFixed(2)} d'API
-            </p>
-          </div>
-
-          {!isOnline && (
-            <p style={{ fontSize: 11, color: C.amber, textAlign: 'center', margin: '0 0 12px' }}>
-              ⚠ Tu dois être connecté à internet pour télécharger
-            </p>
-          )}
-
-          <button
-            onClick={startDownload}
-            disabled={!isOnline || totalRequested === 0}
-            style={{
-              width: '100%',
-              background: (isOnline && totalRequested > 0) ? C.teal : C.border,
-              color: (isOnline && totalRequested > 0) ? C.bg : C.textDim,
-              border: 'none', padding: 14, borderRadius: 8,
-              fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
-              marginBottom: 12,
-            }}
-          >📥 LANCER LE TÉLÉCHARGEMENT</button>
-
-          {(packStats.sentences + packStats.texts + packStats.dialogues) > 0 && (
-            <button onClick={handleClear} style={{
-              width: '100%', background: 'transparent', border: `0.5px solid ${C.red}`,
-              color: C.red, padding: 11, borderRadius: 8, fontSize: 11, letterSpacing: 1,
-            }}>🗑 EFFACER LE PACK ({packStats.sentences + packStats.texts + packStats.dialogues} exos)</button>
-          )}
-        </>
-      )}
+              {isDl ? (
+                <button onClick={() => deleteOne(lesson)} disabled={downloading} style={{
+                  background: 'transparent', border: 'none', color: C.red,
+                  fontSize: 14, padding: '4px 8px',
+                }}>×</button>
+              ) : (
+                <button onClick={() => downloadOne(lesson)} disabled={!isOnline || downloading} style={{
+                  background: isOnline && !downloading ? 'transparent' : C.border,
+                  border: `0.5px solid ${isOnline && !downloading ? C.teal : C.border}`,
+                  color: isOnline && !downloading ? C.teal : C.textDim,
+                  padding: '5px 10px', borderRadius: 4, fontSize: 10, letterSpacing: 0.5,
+                }}>↓ DL</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 
-// ============================================================
-// ERROR BOOK — Carnet des erreurs récentes
 // ============================================================
 function ErrorBookScreen({ onBack, onPracticeItem }) {
   const [errors, setErrors] = useState([]);
@@ -4804,7 +4796,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
   const handleFillSubmit = () => {
     if (submitted) return;
     setSubmitted(true);
-    const correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+    const correct = pinyinMatches(userInput, word.pinyin).match;
     setFeedback(correct ? 'correct' : 'wrong');
     setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
     updateWordQuality(word.id, modality, correct);
@@ -4826,7 +4818,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     const audioMode = currentExo.audioMode; // 'pinyin' | 'fr'
     let correct = false;
     if (audioMode === 'pinyin') {
-      correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+      correct = pinyinMatches(userInput, word.pinyin).match;
     } else {
       // Pour le sens : on accepte si la réponse contient le sens principal (insensible à la casse)
       const userClean = userInput.toLowerCase().trim();
@@ -5161,24 +5153,12 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
         return setCurrentExo({ type: 'word_quick_qcm', word: w });
       }
 
-      // Type d'exo phrase : "Quel mot dans cette phrase signifie X ?" (français → trouve hanzi dans phrase)
-      // ou "Cette phrase signifie quoi ?" (QCM traduction)
-      const subType = Math.random() < 0.5 ? 'phrase_word_qcm' : 'phrase_translate_qcm';
-
-      if (subType === 'phrase_word_qcm') {
-        // Distracteurs : autres mots de la leçon non présents dans la phrase
-        const wordsInPhrase = new Set(phrase.words);
-        const distractors = words.filter(w => !wordsInPhrase.has(w.id) && w.id !== targetWord.id);
-        const shuffledD = [...distractors].sort(() => Math.random() - 0.5).slice(0, 3);
-        const opts = [targetWord, ...shuffledD].sort(() => Math.random() - 0.5);
-        setCurrentExo({ type: 'phrase_word_qcm', phrase, targetWord, options: opts });
-      } else {
-        // Distracteurs : phrases d'autres leçons + autres phrases de la leçon courante
-        const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
-        const shuffledP = [...otherPhrases].sort(() => Math.random() - 0.5).slice(0, 3);
-        const opts = [phrase, ...shuffledP].sort(() => Math.random() - 0.5);
-        setCurrentExo({ type: 'phrase_translate_qcm', phrase, targetWord, options: opts });
-      }
+      // Un seul type d'exo phrase : "Cette phrase signifie quoi ?" (QCM traduction)
+      // Distracteurs : autres phrases de la leçon courante
+      const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
+      const shuffledP = [...otherPhrases].sort(() => Math.random() - 0.5).slice(0, 3);
+      const opts = [phrase, ...shuffledP].sort(() => Math.random() - 0.5);
+      setCurrentExo({ type: 'phrase_translate_qcm', phrase, targetWord, options: opts });
     } else {
       // QCM rapide mot pour rafraîchir
       const word = wordsToWork[Math.floor(Math.random() * wordsToWork.length)];
@@ -5312,53 +5292,6 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
       })()}
 
       {/* "Quel mot signifie X dans cette phrase ?" */}
-      {currentExo.type === 'phrase_word_qcm' && (
-        <>
-          <div style={{
-            background: 'linear-gradient(135deg, rgba(244,114,182,0.05), rgba(168,85,247,0.03))',
-            border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
-          }}>
-            <p className="hanzi" style={{ fontSize: 24, margin: '0 0 8px', color: C.text }}>
-              {currentExo.phrase.hanzi}
-            </p>
-            <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 6px' }}>
-              {currentExo.phrase.pinyin}
-            </p>
-            <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
-              {currentExo.phrase.fr}
-            </p>
-            {isTTSAvailable() && (
-              <button onClick={() => speak(currentExo.phrase.hanzi)} style={{
-                marginTop: 10, background: 'transparent', border: `0.5px solid ${C.teal}`,
-                color: C.teal, padding: '4px 10px', borderRadius: 6, fontSize: 10, letterSpacing: 1,
-              }}>♪ ÉCOUTER</button>
-            )}
-          </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
-            Quel mot de la phrase signifie « <span style={{ color: C.amber, fontWeight: 500 }}>{currentExo.targetWord.fr}</span> » ?
-          </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-            {currentExo.options.map(opt => {
-              let borderColor = C.border, bg = C.bgCard;
-              if (submitted) {
-                if (opt.id === currentExo.targetWord.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
-              }
-              return (
-                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.targetWord.id, currentExo.targetWord.id)} disabled={submitted} style={{
-                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
-                  display: 'flex', alignItems: 'center', gap: 10,
-                }}>
-                  <span className="hanzi" style={{ fontSize: 18 }}>{opt.hanzi}</span>
-                  <span style={{ fontSize: 11, color: C.textDim }}>{opt.pinyin}</span>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      )}
-
       {/* "Cette phrase signifie quoi ?" */}
       {currentExo.type === 'phrase_translate_qcm' && (
         <>
@@ -5487,20 +5420,31 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
 
   // Tokeniser une phrase en "mots" présents dans le vocab (par greedy match)
   const tokenizePhrase = (phraseObj) => {
-    // Utilise les words du vocab dans l'ordre d'apparition dans hanzi
+    // Découpe en SYLLABES PINYIN (chaque "syllabe" = 1 caractère hanzi de la phrase)
+    // Format : [{ pinyin: 'wǒ', hanzi: '我', fr: 'je, moi' }, { pinyin: 'shì', hanzi: '是', fr: 'être' }, ...]
+    const text = phraseObj.hanzi.replace(/[，。?!？!；;,.]/g, '');
     if (!phraseObj.words || phraseObj.words.length === 0) {
-      // Fallback : split par caractère
-      return phraseObj.hanzi.split('').map((c, i) => ({ hanzi: c, pinyin: '', id: `c${i}` }));
+      // Fallback : on découpe le pinyin sur les espaces (chaque mot pinyin = 1 syllabe approx)
+      const pinyinSyllables = phraseObj.pinyin
+        ? phraseObj.pinyin.replace(/[，。?!？!；;,.]/g, '').split(/\s+/).filter(Boolean)
+        : [];
+      return pinyinSyllables.map((p, i) => ({
+        pinyin: p,
+        hanzi: text[i] || '',
+        fr: '',
+        id: `s${i}`,
+      }));
     }
-    // Reconstituer l'ordre d'apparition dans la phrase
-    const text = phraseObj.hanzi.replace(/[，。？！,.?!；;]/g, '');
+
+    // Construire un map hanzi → mot vocab
     const wordsByHanzi = {};
     phraseObj.words.forEach(wid => {
       const w = getWordById(wid);
       if (w) wordsByHanzi[w.hanzi] = w;
     });
-    // Greedy match : on cherche les mots du vocab dans l'ordre, en préférant les plus longs
     const sortedHanzi = Object.keys(wordsByHanzi).sort((a, b) => b.length - a.length);
+
+    // Greedy match dans hanzi pour récupérer les mots, mais on les SPLIT ensuite en SYLLABES
     const result = [];
     let i = 0;
     while (i < text.length) {
@@ -5512,11 +5456,33 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
         }
       }
       if (matched) {
-        result.push(wordsByHanzi[matched]);
+        const word = wordsByHanzi[matched];
+        // Split le pinyin du mot en syllabes (par espace ou apostrophe ou par caractère)
+        const pinyinParts = word.pinyin.split(/\s+/).filter(Boolean);
+        const hanziChars = matched.split('');
+        // Si on a autant de syllabes que de hanzi, on les associe
+        if (pinyinParts.length === hanziChars.length) {
+          for (let k = 0; k < hanziChars.length; k++) {
+            result.push({
+              pinyin: pinyinParts[k],
+              hanzi: hanziChars[k],
+              fr: word.fr,
+              id: `${word.id}_${k}`,
+            });
+          }
+        } else {
+          // Sinon on fusionne tout en un seul token (mot composé inséparable)
+          result.push({
+            pinyin: word.pinyin,
+            hanzi: matched,
+            fr: word.fr,
+            id: `${word.id}`,
+          });
+        }
         i += matched.length;
       } else {
-        // Caractère inconnu, on le garde comme "morceau" individuel
-        result.push({ hanzi: text[i], pinyin: '', fr: '', id: `unknown_${i}` });
+        // Caractère inconnu, on garde comme syllabe individuelle
+        result.push({ hanzi: text[i], pinyin: text[i], fr: '', id: `unknown_${i}` });
         i++;
       }
     }
@@ -5556,16 +5522,25 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       const opts = [phrase, ...distractors].sort(() => Math.random() - 0.5);
       setCurrentExo({ subMode, phrase, options: opts });
     } else if (subMode === 'tap_fr_to_pinyin' || subMode === 'tap_pinyin_to_fr') {
-      // Tap word : on doit reconstruire la phrase mot par mot
+      // Tap word : on doit reconstruire la phrase syllabe pinyin par syllabe pinyin
       const tokens = tokenizePhrase(phrase);
       if (tokens.length === 0) return pickNext(); // fallback
-      // Distracteurs : 2-3 mots d'autres phrases de la leçon
+      // Distracteurs : 2-3 syllabes pinyin d'autres phrases qui ne sont pas dans la phrase courante
+      const correctPinyins = new Set(tokens.map(t => t.pinyin));
       const otherTokens = phrases
         .filter(p => p.id !== phrase.id)
         .flatMap(p => tokenizePhrase(p))
-        .filter(t => !tokens.find(orig => orig.hanzi === t.hanzi));
-      const distractors = [...new Set(otherTokens.map(t => t.hanzi))]
-        .map(h => otherTokens.find(t => t.hanzi === h))
+        .filter(t => !correctPinyins.has(t.pinyin));
+      // Dédupliquer par pinyin
+      const seenPinyin = new Set();
+      const uniqueDistractors = [];
+      for (const t of otherTokens) {
+        if (!seenPinyin.has(t.pinyin)) {
+          seenPinyin.add(t.pinyin);
+          uniqueDistractors.push(t);
+        }
+      }
+      const distractors = uniqueDistractors
         .sort(() => Math.random() - 0.5)
         .slice(0, Math.min(3, Math.max(2, Math.floor(tokens.length / 3))));
       const allTokens = [
@@ -5652,9 +5627,10 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
   };
   const checkTapAnswer = () => {
     if (submitted) return;
-    const userPhrase = tapBuilt.map(t => t.hanzi).join('');
-    const correctPhrase = currentExo.tokens.map(t => t.hanzi).join('');
-    markPhraseResult(userPhrase === correctPhrase);
+    // Comparer la séquence de pinyin (normalisée pour ignorer les tons)
+    const userPinyinSeq = tapBuilt.map(t => normalizePinyin(t.pinyin)).join(' ');
+    const correctPinyinSeq = currentExo.tokens.map(t => normalizePinyin(t.pinyin)).join(' ');
+    markPhraseResult(userPinyinSeq === correctPinyinSeq);
   };
 
   // Fill pinyin handler
@@ -5665,7 +5641,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
 
   const handleFillSubmit = () => {
     if (submitted) return;
-    markPhraseResult(normalizeInput(userInput) === normalizeInput(phrase.pinyin));
+    markPhraseResult(pinyinMatches(userInput, phrase.pinyin).match);
   };
 
   const handleNext = () => {
@@ -5764,7 +5740,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
         </>
       )}
 
-      {/* Tap word : FR → pinyin OU pinyin → FR */}
+      {/* Tap word : FR → pinyin OU pinyin → FR — boutons en pinyin syllabe par syllabe */}
       {(currentExo.subMode === 'tap_fr_to_pinyin' || currentExo.subMode === 'tap_pinyin_to_fr') && (
         <>
           <div style={{
@@ -5775,11 +5751,24 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
             {currentExo.subMode === 'tap_fr_to_pinyin' ? (
               <p style={{ fontSize: 15, color: C.text, margin: 0 }}>{phrase.fr}</p>
             ) : (
-              <p style={{ fontSize: 14, color: C.text, margin: 0, fontFamily: 'monospace', letterSpacing: 0.5 }}>{phrase.pinyin}</p>
+              <>
+                <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '0 0 6px' }}>
+                  {phrase.hanzi}
+                </p>
+                <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+                  {phrase.fr}
+                </p>
+              </>
+            )}
+            {isTTSAvailable() && (
+              <button onClick={() => speak(phrase.hanzi)} style={{
+                marginTop: 10, background: 'transparent', border: `0.5px solid ${C.teal}`,
+                color: C.teal, padding: '4px 10px', borderRadius: 6, fontSize: 10, letterSpacing: 1,
+              }}>♪ ÉCOUTER</button>
             )}
           </div>
           <p style={{ textAlign: 'center', fontSize: 11, color: C.textDim, margin: '0 0 10px' }}>
-            Reconstitue la phrase chinoise
+            Reconstitue la phrase en pinyin
           </p>
 
           {/* Zone de construction */}
@@ -5791,30 +5780,30 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
           }}>
             {tapBuilt.length === 0 && (
               <p style={{ color: C.textFaint, fontSize: 11, margin: 'auto', fontStyle: 'italic' }}>
-                Tappe les mots dans l'ordre...
+                Tappe les syllabes pinyin dans l'ordre...
               </p>
             )}
             {tapBuilt.map(t => (
               <button key={t.key} onClick={() => handleTapRemove(t)} disabled={submitted}
-                className="hanzi"
                 style={{
                   background: C.bgElevated, border: `0.5px solid ${C.borderAccent}`,
-                  color: C.text, padding: '6px 10px', borderRadius: 6, fontSize: 16,
-                }}>{t.hanzi}</button>
+                  color: C.text, padding: '6px 10px', borderRadius: 6, fontSize: 14,
+                  fontFamily: 'monospace', letterSpacing: 0.5,
+                }}>{displayPinyin(t.pinyin)}</button>
             ))}
           </div>
 
           {!submitted && (
             <>
-              <p style={{ fontSize: 9, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>MOTS DISPO</p>
+              <p style={{ fontSize: 9, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>SYLLABES DISPO</p>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14, minHeight: 70 }}>
                 {tapAvailable.map(t => (
                   <button key={t.key} onClick={() => handleTapAdd(t)}
-                    className="hanzi"
                     style={{
                       background: C.bgCard, border: `0.5px solid ${C.border}`,
-                      color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 16,
-                    }}>{t.hanzi}</button>
+                      color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 14,
+                      fontFamily: 'monospace', letterSpacing: 0.5,
+                    }}>{displayPinyin(t.pinyin)}</button>
                 ))}
               </div>
               <button onClick={checkTapAnswer} disabled={tapBuilt.length === 0} style={{
@@ -6021,7 +6010,7 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
   const handleFillSubmit = () => {
     if (submitted) return;
     setSubmitted(true);
-    const correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+    const correct = pinyinMatches(userInput, word.pinyin).match;
     setFeedback(correct ? 'correct' : 'wrong');
     setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
     updateWordQuality(word.id, 'fill_manual', correct);
@@ -6034,7 +6023,7 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
     const audioMode = currentExo.audioMode;
     let correct = false;
     if (audioMode === 'pinyin') {
-      correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+      correct = pinyinMatches(userInput, word.pinyin).match;
     } else {
       const userClean = userInput.toLowerCase().trim();
       const variants = word.fr.toLowerCase().split(/[,;]/).map(s => s.trim());
