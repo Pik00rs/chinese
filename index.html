@@ -136,6 +136,30 @@ function useOnlineStatus() {
 
 
 // ============================================================
+// HOOK : détecter si une nouvelle version du service worker est dispo
+// ============================================================
+function useServiceWorkerUpdate() {
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setUpdateAvailable(true);
+    window.addEventListener('swUpdateAvailable', handler);
+    return () => window.removeEventListener('swUpdateAvailable', handler);
+  }, []);
+
+  const applyUpdate = () => {
+    if (typeof window.applyServiceWorkerUpdate === 'function') {
+      window.applyServiceWorkerUpdate();
+    } else {
+      window.location.reload();
+    }
+  };
+
+  return { updateAvailable, applyUpdate };
+}
+
+
+// ============================================================
 // TTS — Lecture audio via Web Speech API native (gratuit, offline-capable)
 // ============================================================
 function speak(text, lang = 'zh-CN', rate = 0.85) {
@@ -825,6 +849,10 @@ function HSKApp() {
   const [loaded, setLoaded] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
 
+  // Détection de mise à jour PWA
+  const { updateAvailable, applyUpdate } = useServiceWorkerUpdate();
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
   useEffect(() => {
     (async () => {
       const saved = await loadState('hsk_learner_state');
@@ -906,6 +934,45 @@ function HSKApp() {
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
       paddingBottom: '2rem',
     }}>
+      {/* Bandeau de nouvelle version PWA */}
+      {updateAvailable && !updateDismissed && (
+        <div style={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 9999,
+          background: `linear-gradient(135deg, ${C.teal}, ${C.purple})`,
+          color: C.bg,
+          padding: '10px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10,
+          fontSize: 12,
+          fontWeight: 500,
+          letterSpacing: 0.5,
+          boxShadow: '0 2px 12px rgba(45,212,191,0.25)',
+          animation: 'slide-up 0.3s ease-out',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 16 }}>✦</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Nouvelle version disponible
+            </span>
+          </div>
+          <button onClick={applyUpdate} style={{
+            background: C.bg, color: C.teal, border: 'none',
+            padding: '6px 14px', borderRadius: 6, fontSize: 11,
+            fontWeight: 600, letterSpacing: 1, whiteSpace: 'nowrap',
+            cursor: 'pointer',
+          }}>RECHARGER</button>
+          <button onClick={() => setUpdateDismissed(true)} style={{
+            background: 'transparent', color: C.bg, border: 'none',
+            padding: '4px 6px', fontSize: 16, cursor: 'pointer',
+            opacity: 0.7, lineHeight: 1,
+          }} aria-label="Fermer">×</button>
+        </div>
+      )}
+
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
         * { box-sizing: border-box; }
@@ -4778,12 +4845,62 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     setTimeout(() => { if (loadingEl) loadingEl.style.display = 'none'; }, 100);
   </script>
 
-  <!-- Enregistrement du service worker -->
+  <!-- Enregistrement du service worker avec détection auto-update -->
   <script>
     if ('serviceWorker' in navigator) {
+      let swRegistration = null;
+
+      // Émet un événement global "swUpdateAvailable" quand une nouvelle version est prête
+      function notifyUpdateAvailable() {
+        window.dispatchEvent(new CustomEvent('swUpdateAvailable'));
+      }
+
+      // Force l'activation du nouveau SW (appelé par le bouton "Recharger" du bandeau)
+      window.applyServiceWorkerUpdate = function() {
+        if (!swRegistration || !swRegistration.waiting) {
+          location.reload();
+          return;
+        }
+        // Demande au SW en attente de prendre le contrôle
+        swRegistration.waiting.postMessage({ type: 'SKIP_WAITING' });
+      };
+
+      // Quand le nouveau SW prend le contrôle, on recharge la page pour avoir le nouveau code
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (refreshing) return;
+        refreshing = true;
+        window.location.reload();
+      });
+
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js')
-          .then(reg => console.log('SW registered:', reg.scope))
+          .then(reg => {
+            swRegistration = reg;
+            console.log('SW registered:', reg.scope);
+
+            // Si un SW est déjà en attente au moment de l'enregistrement
+            if (reg.waiting) {
+              notifyUpdateAvailable();
+            }
+
+            // Quand une nouvelle version est trouvée et installée, on notifie
+            reg.addEventListener('updatefound', () => {
+              const newWorker = reg.installing;
+              if (!newWorker) return;
+              newWorker.addEventListener('statechange', () => {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  // Nouvelle version installée mais pas encore active (controller existe = c'est une maj)
+                  notifyUpdateAvailable();
+                }
+              });
+            });
+
+            // Vérifier l'existence d'une maj toutes les 10 minutes
+            setInterval(() => {
+              reg.update().catch(err => console.log('SW update check failed:', err));
+            }, 10 * 60 * 1000);
+          })
           .catch(err => console.warn('SW registration failed:', err));
       });
     }
