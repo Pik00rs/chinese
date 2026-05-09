@@ -1013,7 +1013,10 @@ function HSKApp() {
                 const id = m.split(':')[1];
                 setSelectedLessonId(id);
                 startLesson(id);
-                setScreen('lessonphase1');
+                // Lancer la phase courante (par défaut 1)
+                const progress = loadLessonProgress()[id];
+                const phase = progress?.current_phase || 1;
+                setScreen(`lessonphase${Math.min(phase, 5)}`);
               } else {
                 setScreen(m);
               }
@@ -1130,7 +1133,12 @@ function HSKApp() {
           <LessonDetailScreen
             lessonId={selectedLessonId}
             onBack={() => setScreen('lessonslist')}
-            onStart={(id) => { startLesson(id); setScreen('lessonphase1'); }}
+            onStart={(id) => {
+              startLesson(id);
+              const progress = loadLessonProgress()[id];
+              const phase = progress?.current_phase || 1;
+              setScreen(`lessonphase${Math.min(phase, 5)}`);
+            }}
           />
         )}
         {screen === 'lessonphase1' && selectedLessonId && (
@@ -1140,6 +1148,49 @@ function HSKApp() {
             onPhaseComplete={() => {
               completeLessonPhase(selectedLessonId, 1);
               updateLessonPhase(selectedLessonId, 2);
+              setScreen('lessonphase2');
+            }}
+          />
+        )}
+        {screen === 'lessonphase2' && selectedLessonId && (
+          <LessonPhase2Screen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onPhaseComplete={() => {
+              completeLessonPhase(selectedLessonId, 2);
+              updateLessonPhase(selectedLessonId, 3);
+              setScreen('lessonphase3');
+            }}
+          />
+        )}
+        {screen === 'lessonphase3' && selectedLessonId && (
+          <LessonPhase3Screen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onPhaseComplete={() => {
+              completeLessonPhase(selectedLessonId, 3);
+              updateLessonPhase(selectedLessonId, 4);
+              setScreen('lessonphase4');
+            }}
+          />
+        )}
+        {screen === 'lessonphase4' && selectedLessonId && (
+          <LessonPhase4Screen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onPhaseComplete={() => {
+              completeLessonPhase(selectedLessonId, 4);
+              updateLessonPhase(selectedLessonId, 5);
+              setScreen('lessonphase5');
+            }}
+          />
+        )}
+        {screen === 'lessonphase5' && selectedLessonId && (
+          <LessonPhase5Screen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onPhaseComplete={() => {
+              completeLessonPhase(selectedLessonId, 5);
               setScreen('lessondetail');
             }}
           />
@@ -1901,11 +1952,43 @@ function Stat({ label, value, color }) {
 // PROFILE / SETTINGS
 // ============================================================
 function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenPack }) {
+  const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'uptodate' | 'updating'
+
   const interestOptions = [
     { id: 'hanzi', label: 'Hanzi 汉字', desc: 'Les caractères chinois', color: C.teal },
     { id: 'pinyin', label: 'Pinyin pīnyīn', desc: 'La transcription phonétique', color: C.amber },
     { id: 'sens', label: 'Sens / traduction', desc: 'Le sens en français', color: C.purple },
   ];
+
+  const checkForUpdates = async () => {
+    setUpdateStatus('checking');
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.update();
+          if (reg.waiting) {
+            // Une nouvelle version est prête, on l'active
+            setUpdateStatus('updating');
+            reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+            // controllerchange dans index.html va recharger la page
+            return;
+          }
+          // Pas de mise à jour disponible
+          await new Promise(r => setTimeout(r, 800));
+          setUpdateStatus('uptodate');
+          setTimeout(() => setUpdateStatus('idle'), 2000);
+        } else {
+          location.reload();
+        }
+      } else {
+        location.reload();
+      }
+    } catch (e) {
+      console.warn('Update check failed:', e);
+      location.reload();
+    }
+  };
 
   const toggleInterest = (id) => {
     setProfile(p => {
@@ -2067,6 +2150,19 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
           </div>
           <span style={{ color: C.teal, fontSize: 20 }}>›</span>
         </div>
+      </button>
+
+      <button onClick={checkForUpdates} disabled={updateStatus !== 'idle'} style={{
+        width: '100%', background: 'transparent',
+        border: `0.5px solid ${updateStatus === 'uptodate' ? C.teal : C.teal}`,
+        color: C.teal, padding: 13, borderRadius: 8, fontSize: 12, letterSpacing: 1,
+        marginBottom: 8,
+        opacity: updateStatus === 'idle' ? 1 : 0.7,
+      }}>
+        {updateStatus === 'idle' && '↻ VÉRIFIER LES MISES À JOUR'}
+        {updateStatus === 'checking' && '⟳ VÉRIFICATION...'}
+        {updateStatus === 'updating' && '⟳ INSTALLATION...'}
+        {updateStatus === 'uptodate' && '✓ DÉJÀ À JOUR'}
       </button>
 
       <button onClick={onResetOnboarding} style={{
@@ -4429,6 +4525,66 @@ function LessonDetailScreen({ lessonId, onBack, onStart }) {
         )}
       </div>
 
+      {/* Stepper des 5 phases */}
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 10px' }}>
+        PARCOURS DE LA LEÇON
+      </p>
+      <div style={{
+        background: C.bgCard, border: `0.5px solid ${C.border}`,
+        borderRadius: 8, padding: 14, marginBottom: 20,
+      }}>
+        {[1, 2, 3, 4, 5].map(phaseNum => {
+          const isCompleted = progress?.phase_progress?.[phaseNum];
+          const isCurrent = currentPhase === phaseNum && !isCompleted;
+          const isLocked = !isCompleted && !isCurrent && phaseNum > currentPhase;
+
+          let icon = '○';
+          let iconColor = C.textFaint;
+          let textColor = C.textDim;
+          let badge = null;
+
+          if (isCompleted) {
+            icon = '✓'; iconColor = C.teal; textColor = C.text;
+          } else if (isCurrent) {
+            icon = '◐'; iconColor = C.amber; textColor = C.text;
+            badge = (
+              <span style={{
+                fontSize: 9, padding: '2px 8px', background: C.amber, color: C.bg,
+                borderRadius: 10, letterSpacing: 1, fontWeight: 600,
+              }}>EN COURS</span>
+            );
+          } else if (isLocked) {
+            icon = '◌'; iconColor = C.textFaint; textColor = C.textFaint;
+          }
+
+          return (
+            <div key={phaseNum} style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '8px 0',
+              borderBottom: phaseNum < 5 ? `0.5px solid ${C.border}` : 'none',
+              opacity: isLocked ? 0.5 : 1,
+            }}>
+              <span style={{
+                fontSize: 18, color: iconColor, minWidth: 22, textAlign: 'center',
+              }}>{icon}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ fontSize: 12, margin: '0 0 2px', fontWeight: 500, color: textColor }}>
+                  Phase {phaseNum} · {phaseLabels[phaseNum]}
+                </p>
+                <p style={{ fontSize: 10, color: C.textDim, margin: 0 }}>
+                  {phaseNum === 1 && '4 modalités par mot : QCM ↔ traduction + écriture + audio'}
+                  {phaseNum === 2 && 'Mots dans des phrases courtes'}
+                  {phaseNum === 3 && 'Phrases complètes : QCM, tap-word, écriture'}
+                  {phaseNum === 4 && 'Renforcement adaptatif sur les mots faibles'}
+                  {phaseNum === 5 && 'Texte de synthèse via IA'}
+                </p>
+              </div>
+              {badge}
+            </div>
+          );
+        })}
+      </div>
+
       {/* Liste des mots cibles */}
       <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 10px' }}>
         MOTS CIBLES ({words.length})
@@ -4516,7 +4672,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     // Mots dont la modalité QCM ou fill_manual n'est pas encore validée
     return words.filter(w => {
       const q = wordQuality[w.id] || {};
-      return !(q.qcm_zh_fr && q.qcm_fr_zh && q.fill_manual);
+      return !(q.qcm_zh_fr && q.qcm_fr_zh && q.fill_manual && q.audio);
     });
   }, [words, wordQuality]);
 
@@ -4542,8 +4698,8 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     const sortedWords = [...wordsToWork].sort((a, b) => {
       const qa = wordQuality[a.id] || {};
       const qb = wordQuality[b.id] || {};
-      const scoreA = (qa.qcm_zh_fr ? 1 : 0) + (qa.qcm_fr_zh ? 1 : 0) + (qa.fill_manual ? 1 : 0);
-      const scoreB = (qb.qcm_zh_fr ? 1 : 0) + (qb.qcm_fr_zh ? 1 : 0) + (qb.fill_manual ? 1 : 0);
+      const scoreA = (qa.qcm_zh_fr ? 1 : 0) + (qa.qcm_fr_zh ? 1 : 0) + (qa.fill_manual ? 1 : 0) + (qa.audio ? 1 : 0);
+      const scoreB = (qb.qcm_zh_fr ? 1 : 0) + (qb.qcm_fr_zh ? 1 : 0) + (qb.fill_manual ? 1 : 0) + (qb.audio ? 1 : 0);
       return scoreA - scoreB; // moins maîtrisé d'abord
     });
     const word = sortedWords[Math.floor(Math.random() * Math.min(3, sortedWords.length))];
@@ -4554,6 +4710,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     if (!q.qcm_zh_fr) modalities.push('qcm_zh_fr');
     if (!q.qcm_fr_zh) modalities.push('qcm_fr_zh');
     if (!q.fill_manual) modalities.push('fill_manual');
+    if (!q.audio && isTTSAvailable()) modalities.push('audio');
 
     const modality = modalities[Math.floor(Math.random() * modalities.length)];
 
@@ -4568,6 +4725,12 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       const distractors = [...candidates].sort(() => Math.random() - 0.5).slice(0, 3);
       const all = [...distractors, word].sort(() => Math.random() - 0.5);
       setCurrentExo({ word, modality, options: all });
+    } else if (modality === 'audio') {
+      // Audio : on entend, on tape pinyin OU sens (alterne au hasard)
+      const audioMode = Math.random() < 0.5 ? 'pinyin' : 'fr';
+      setCurrentExo({ word, modality, audioMode });
+      // Lancer l'audio automatiquement après un court délai
+      setTimeout(() => speak(word.hanzi), 400);
     } else {
       // Remplissage manuel : user tape le pinyin du mot
       setCurrentExo({ word, modality });
@@ -4656,15 +4819,47 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     markActivity(1);
   };
 
+  // Handler audio : on entend, on tape pinyin OU sens FR
+  const handleAudioSubmit = () => {
+    if (submitted) return;
+    setSubmitted(true);
+    const audioMode = currentExo.audioMode; // 'pinyin' | 'fr'
+    let correct = false;
+    if (audioMode === 'pinyin') {
+      correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+    } else {
+      // Pour le sens : on accepte si la réponse contient le sens principal (insensible à la casse)
+      const userClean = userInput.toLowerCase().trim();
+      const expected = word.fr.toLowerCase();
+      // On split sur virgules et on accepte si une des variantes match
+      const variants = expected.split(/[,;]/).map(s => s.trim());
+      correct = variants.some(v => v === userClean) ||
+                userClean.length >= 3 && variants.some(v => v.includes(userClean) || userClean.includes(v));
+    }
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    updateWordQuality(word.id, 'audio', correct);
+    if (!correct) {
+      logError({
+        item_id: word.id, hanzi: word.hanzi, pinyin: word.pinyin, fr: word.fr,
+        facet: 'audio', mode: 'lesson_phase1',
+        error_type: 'unknown',
+        user_answer: userInput,
+        correct_answer: audioMode === 'pinyin' ? word.pinyin : word.fr,
+      });
+    }
+    markActivity(1);
+  };
+
   const handleNext = () => {
     setRefreshKey(k => k + 1);
     pickNext();
   };
 
-  const totalToValidate = words.length * 3; // 3 modalités par mot
+  const totalToValidate = words.length * (isTTSAvailable() ? 4 : 3);
   const validated = words.reduce((sum, w) => {
     const q = wordQuality[w.id] || {};
-    return sum + (q.qcm_zh_fr ? 1 : 0) + (q.qcm_fr_zh ? 1 : 0) + (q.fill_manual ? 1 : 0);
+    return sum + (q.qcm_zh_fr ? 1 : 0) + (q.qcm_fr_zh ? 1 : 0) + (q.fill_manual ? 1 : 0) + (isTTSAvailable() && q.audio ? 1 : 0);
   }, 0);
 
   return (
@@ -4813,6 +5008,65 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
         </>
       )}
 
+      {/* AUDIO : on entend, on tape pinyin ou français */}
+      {modality === 'audio' && currentExo.audioMode && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(168,85,247,0.08), rgba(45,212,191,0.05))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '32px 16px', marginBottom: 16, textAlign: 'center',
+          }}>
+            <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 12px' }}>
+              ÉCOUTE
+            </p>
+            <button onClick={() => speak(word.hanzi)} style={{
+              background: C.purple, color: C.bg, border: 'none',
+              width: 80, height: 80, borderRadius: '50%',
+              fontSize: 32, marginBottom: 8,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 0 24px rgba(168,85,247,0.35)',
+            }}>♪</button>
+            <p style={{ fontSize: 11, color: C.textDim, margin: '8px 0 0' }}>
+              Tap pour réécouter
+            </p>
+            {submitted && (
+              <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '12px 0 0' }}>
+                {word.hanzi}
+              </p>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            {currentExo.audioMode === 'pinyin'
+              ? 'Tape le pinyin (les tons sont optionnels)'
+              : 'Tape la traduction française'}
+          </p>
+          <input
+            type="text" value={userInput} onChange={e => setUserInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAudioSubmit()}
+            disabled={submitted}
+            placeholder={currentExo.audioMode === 'pinyin' ? 'ex: ni hao' : 'ex: bonjour'}
+            autoFocus
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: C.bgCard,
+              border: `0.5px solid ${submitted ? (feedback === 'correct' ? C.teal : C.red) : C.border}`,
+              color: C.text, padding: 14, borderRadius: 8, fontSize: 16,
+              fontFamily: currentExo.audioMode === 'pinyin' ? 'monospace' : 'inherit',
+              letterSpacing: currentExo.audioMode === 'pinyin' ? 1 : 'normal',
+              marginBottom: 12,
+            }}
+          />
+          {!submitted && (
+            <button onClick={handleAudioSubmit} disabled={!userInput.trim()} style={{
+              width: '100%', background: userInput.trim() ? C.purple : C.border,
+              color: userInput.trim() ? C.bg : C.textDim, border: 'none',
+              padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+              marginBottom: 12,
+            }}>VÉRIFIER</button>
+          )}
+        </>
+      )}
+
       {/* Feedback global */}
       {submitted && (
         <>
@@ -4838,7 +5092,1591 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       )}
     </div>
   );
-}// Mount
+}
+
+// ============================================================
+// LESSON PHASE 2 — Mots + petites phrases
+// On boucle sur les mots cibles + phrases courtes qui les contiennent
+// Objectif : valider la modalité 'in_phrase' pour chaque mot cible
+// ============================================================
+function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
+  const lesson = getLessonById(lessonId);
+  const words = useMemo(() => (lesson?.word_ids || []).map(id => getWordById(id)).filter(Boolean), [lessonId]);
+  const allLessonPhrases = useMemo(
+    () => (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean),
+    [lessonId]
+  );
+
+  // Phrases courtes à utiliser pour cette phase (≤10 caractères + au moins 2 mots de la leçon)
+  const shortPhrases = useMemo(() => {
+    const wordSet = new Set(words.map(w => w.id));
+    return allLessonPhrases.filter(p =>
+      p.hanzi.length <= 10 && p.words && p.words.filter(wid => wordSet.has(wid)).length >= 1
+    );
+  }, [allLessonPhrases, words]);
+
+  const [currentExo, setCurrentExo] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [stats, setStats] = useState({ done: 0, correct: 0 });
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
+
+  // Mots qui n'ont PAS encore validé in_phrase → à travailler
+  const wordsToWork = useMemo(() => {
+    return words.filter(w => !(wordQuality[w.id]?.in_phrase));
+  }, [words, wordQuality]);
+
+  const phaseDone = wordsToWork.length === 0;
+
+  const pickNext = () => {
+    setSubmitted(false);
+    setFeedback(null);
+    if (phaseDone) {
+      setCurrentExo(null);
+      return;
+    }
+
+    // Stratégie : alterner entre exo "phrase contenant un mot cible" (60%) et "QCM mot rapide" (40%)
+    // Mais si pas de phrases dispo, on fait que des QCM
+    const useSentence = shortPhrases.length > 0 && Math.random() < 0.7;
+
+    if (useSentence) {
+      // Choisir une phrase qui contient au moins un mot non-validé
+      const wordsToWorkIds = new Set(wordsToWork.map(w => w.id));
+      const candidatesPhrases = shortPhrases.filter(p =>
+        p.words.some(wid => wordsToWorkIds.has(wid))
+      );
+      const phrase = candidatesPhrases.length > 0
+        ? candidatesPhrases[Math.floor(Math.random() * candidatesPhrases.length)]
+        : shortPhrases[Math.floor(Math.random() * shortPhrases.length)];
+
+      // Choisir le mot cible dans cette phrase
+      const targetWordId = phrase.words.find(wid => wordsToWorkIds.has(wid)) || phrase.words[0];
+      const targetWord = getWordById(targetWordId);
+      if (!targetWord) {
+        // fallback QCM mot
+        const w = wordsToWork[Math.floor(Math.random() * wordsToWork.length)];
+        return setCurrentExo({ type: 'word_quick_qcm', word: w });
+      }
+
+      // Type d'exo phrase : "Quel mot dans cette phrase signifie X ?" (français → trouve hanzi dans phrase)
+      // ou "Cette phrase signifie quoi ?" (QCM traduction)
+      const subType = Math.random() < 0.5 ? 'phrase_word_qcm' : 'phrase_translate_qcm';
+
+      if (subType === 'phrase_word_qcm') {
+        // Distracteurs : autres mots de la leçon non présents dans la phrase
+        const wordsInPhrase = new Set(phrase.words);
+        const distractors = words.filter(w => !wordsInPhrase.has(w.id) && w.id !== targetWord.id);
+        const shuffledD = [...distractors].sort(() => Math.random() - 0.5).slice(0, 3);
+        const opts = [targetWord, ...shuffledD].sort(() => Math.random() - 0.5);
+        setCurrentExo({ type: 'phrase_word_qcm', phrase, targetWord, options: opts });
+      } else {
+        // Distracteurs : phrases d'autres leçons + autres phrases de la leçon courante
+        const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
+        const shuffledP = [...otherPhrases].sort(() => Math.random() - 0.5).slice(0, 3);
+        const opts = [phrase, ...shuffledP].sort(() => Math.random() - 0.5);
+        setCurrentExo({ type: 'phrase_translate_qcm', phrase, targetWord, options: opts });
+      }
+    } else {
+      // QCM rapide mot pour rafraîchir
+      const word = wordsToWork[Math.floor(Math.random() * wordsToWork.length)];
+      setCurrentExo({ type: 'word_quick_qcm', word });
+    }
+  };
+
+  useEffect(() => {
+    if (!phaseDone && !currentExo) pickNext();
+  }, [phaseDone, refreshKey]);
+
+  if (!lesson) return <p style={{ color: C.textDim }}>Leçon introuvable.</p>;
+
+  // Phase complétée
+  if (phaseDone) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <div style={{ textAlign: 'center', padding: '3rem 1rem' }}>
+          <p style={{ fontSize: 56, margin: '0 0 16px', color: C.teal }}>✓</p>
+          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+            Phase 2 terminée
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Tu reconnais maintenant ces mots dans des phrases. Phase 3 : phrases complètes.
+          </p>
+          <button onClick={onPhaseComplete} style={{
+            background: C.teal, color: C.bg, border: 'none',
+            padding: '12px 28px', borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>CONTINUER →</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentExo) return null;
+
+  // Handler unifié
+  const handleSelect = (correct, targetWordId) => {
+    if (submitted) return;
+    setSubmitted(true);
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    if (correct && targetWordId) {
+      updateWordQuality(targetWordId, 'in_phrase', true);
+    } else if (!correct && targetWordId) {
+      updateWordQuality(targetWordId, 'in_phrase', false);
+      const w = getWordById(targetWordId);
+      if (w) {
+        logError({
+          item_id: w.id, hanzi: w.hanzi, pinyin: w.pinyin, fr: w.fr,
+          facet: 'in_phrase', mode: 'lesson_phase2',
+          error_type: 'unknown', user_answer: '?', correct_answer: w.fr,
+        });
+      }
+    }
+    markActivity(1);
+  };
+
+  const handleNext = () => {
+    setRefreshKey(k => k + 1);
+    pickNext();
+  };
+
+  const totalToValidate = words.length;
+  const validated = words.filter(w => wordQuality[w.id]?.in_phrase).length;
+
+  return (
+    <div className="slide-up">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0,
+        }}>← retour</button>
+        <span style={{ fontSize: 11, color: C.textDim, letterSpacing: 1 }}>
+          {validated} / {totalToValidate} mots dans phrases
+        </span>
+      </div>
+
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+        PHASE 2 · MOTS DANS PHRASES
+      </p>
+      <p style={{ fontSize: 16, margin: '0 0 16px', color: C.text }}>{lesson.theme}</p>
+
+      <div style={{ height: 3, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 20 }}>
+        <div style={{
+          width: `${(validated / totalToValidate) * 100}%`, height: '100%',
+          background: `linear-gradient(90deg, ${C.teal}, ${C.purple})`, transition: 'width 0.3s',
+        }} />
+      </div>
+
+      {/* QCM rapide sur un mot (pour rafraîchir) */}
+      {currentExo.type === 'word_quick_qcm' && (() => {
+        const w = currentExo.word;
+        const distractors = words.filter(x => x.id !== w.id);
+        const opts = [...distractors.sort(() => Math.random() - 0.5).slice(0, 3), w].sort(() => Math.random() - 0.5);
+        return (
+          <>
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
+              border: `0.5px solid ${C.borderAccent}`,
+              borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+            }}>
+              <p className="hanzi" style={{ fontSize: 42, margin: 0, color: C.text, fontWeight: 300 }}>
+                {w.hanzi}
+              </p>
+              <p style={{ fontSize: 12, color: C.textDim, margin: '8px 0 0' }}>
+                {w.pinyin}
+              </p>
+            </div>
+            <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+              Quel sens ?
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+              {opts.map(opt => {
+                let borderColor = C.border, bg = C.bgCard;
+                if (submitted) {
+                  if (opt.id === w.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+                }
+                return (
+                  <button key={opt.id} onClick={() => handleSelect(opt.id === w.id, w.id)} disabled={submitted} style={{
+                    background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                    padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  }}>{opt.fr}</button>
+                );
+              })}
+            </div>
+          </>
+        );
+      })()}
+
+      {/* "Quel mot signifie X dans cette phrase ?" */}
+      {currentExo.type === 'phrase_word_qcm' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(244,114,182,0.05), rgba(168,85,247,0.03))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 24, margin: '0 0 8px', color: C.text }}>
+              {currentExo.phrase.hanzi}
+            </p>
+            <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 6px' }}>
+              {currentExo.phrase.pinyin}
+            </p>
+            <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+              {currentExo.phrase.fr}
+            </p>
+            {isTTSAvailable() && (
+              <button onClick={() => speak(currentExo.phrase.hanzi)} style={{
+                marginTop: 10, background: 'transparent', border: `0.5px solid ${C.teal}`,
+                color: C.teal, padding: '4px 10px', borderRadius: 6, fontSize: 10, letterSpacing: 1,
+              }}>♪ ÉCOUTER</button>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Quel mot de la phrase signifie « <span style={{ color: C.amber, fontWeight: 500 }}>{currentExo.targetWord.fr}</span> » ?
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {currentExo.options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) {
+                if (opt.id === currentExo.targetWord.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              }
+              return (
+                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.targetWord.id, currentExo.targetWord.id)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <span className="hanzi" style={{ fontSize: 18 }}>{opt.hanzi}</span>
+                  <span style={{ fontSize: 11, color: C.textDim }}>{opt.pinyin}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* "Cette phrase signifie quoi ?" */}
+      {currentExo.type === 'phrase_translate_qcm' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(244,114,182,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '24px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 28, margin: '0 0 10px', color: C.text }}>
+              {currentExo.phrase.hanzi}
+            </p>
+            <p style={{ fontSize: 13, color: C.textDim, margin: 0, letterSpacing: 0.5 }}>
+              {currentExo.phrase.pinyin}
+            </p>
+            {isTTSAvailable() && (
+              <button onClick={() => speak(currentExo.phrase.hanzi)} style={{
+                marginTop: 12, background: 'transparent', border: `0.5px solid ${C.teal}`,
+                color: C.teal, padding: '5px 12px', borderRadius: 8, fontSize: 11, letterSpacing: 1,
+              }}>♪ ÉCOUTER</button>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Quelle traduction ?
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {currentExo.options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) {
+                if (opt.id === currentExo.phrase.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              }
+              return (
+                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.targetWord.id)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                }}>{opt.fr}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {submitted && (
+        <>
+          <div style={{
+            padding: 12, borderRadius: 8, marginBottom: 12,
+            background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
+          }}>
+            <p style={{ margin: 0, fontSize: 13, color: feedback === 'correct' ? C.teal : C.red, fontWeight: 500 }}>
+              {feedback === 'correct' ? '✓ Bien vu' : '✗ Pas tout à fait'}
+            </p>
+          </div>
+          <button onClick={handleNext} style={{
+            width: '100%', background: C.teal, color: C.bg, border: 'none',
+            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>SUIVANT →</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ============================================================
+// LESSON PHASE 3 — Phrases complètes
+// 5 sous-modes en boucle :
+//  - QCM FR → pinyin
+//  - QCM pinyin → FR
+//  - Tap word FR → pinyin (construction)
+//  - Tap word pinyin → FR (construction)
+//  - Remplissage manuel pinyin
+// On valide la phrase (et chaque mot reconnu via in_phrase + audio si TTS utilisé)
+// On considère la phase complète quand 80% des phrases ont été réussies au moins 1 fois
+// ============================================================
+function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
+  const lesson = getLessonById(lessonId);
+  const phrases = useMemo(
+    () => (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean),
+    [lessonId]
+  );
+
+  // Persistance des phrases déjà réussies dans la phase 3 de cette leçon
+  const phraseProgressKey = `hsk_phase3_${lessonId}`;
+  const [phraseProgress, setPhraseProgress] = useState(() => {
+    try {
+      const raw = localStorage.getItem(phraseProgressKey);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
+  const savePhraseProgress = (np) => {
+    setPhraseProgress(np);
+    try { localStorage.setItem(phraseProgressKey, JSON.stringify(np)); } catch {}
+  };
+
+  const [currentExo, setCurrentExo] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [userInput, setUserInput] = useState('');
+  const [tapBuilt, setTapBuilt] = useState([]);
+  const [tapAvailable, setTapAvailable] = useState([]);
+  const [stats, setStats] = useState({ done: 0, correct: 0 });
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  if (!lesson) return null;
+  if (phrases.length === 0) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <p style={{ color: C.textDim, padding: '2rem 0' }}>
+          Cette leçon n'a pas de phrases associées. Phase 3 sautée.
+        </p>
+        <button onClick={onPhaseComplete} style={{
+          width: '100%', background: C.teal, color: C.bg, border: 'none',
+          padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14,
+        }}>CONTINUER →</button>
+      </div>
+    );
+  }
+
+  // Cible : 80% des phrases réussies au moins 1 fois
+  const targetPhrases = Math.max(1, Math.ceil(phrases.length * 0.8));
+  const succeededCount = Object.values(phraseProgress).filter(v => v >= 1).length;
+  const phaseDone = succeededCount >= targetPhrases;
+
+  // Tokeniser une phrase en "mots" présents dans le vocab (par greedy match)
+  const tokenizePhrase = (phraseObj) => {
+    // Utilise les words du vocab dans l'ordre d'apparition dans hanzi
+    if (!phraseObj.words || phraseObj.words.length === 0) {
+      // Fallback : split par caractère
+      return phraseObj.hanzi.split('').map((c, i) => ({ hanzi: c, pinyin: '', id: `c${i}` }));
+    }
+    // Reconstituer l'ordre d'apparition dans la phrase
+    const text = phraseObj.hanzi.replace(/[，。？！,.?!；;]/g, '');
+    const wordsByHanzi = {};
+    phraseObj.words.forEach(wid => {
+      const w = getWordById(wid);
+      if (w) wordsByHanzi[w.hanzi] = w;
+    });
+    // Greedy match : on cherche les mots du vocab dans l'ordre, en préférant les plus longs
+    const sortedHanzi = Object.keys(wordsByHanzi).sort((a, b) => b.length - a.length);
+    const result = [];
+    let i = 0;
+    while (i < text.length) {
+      let matched = null;
+      for (const h of sortedHanzi) {
+        if (text.substr(i, h.length) === h) {
+          matched = h;
+          break;
+        }
+      }
+      if (matched) {
+        result.push(wordsByHanzi[matched]);
+        i += matched.length;
+      } else {
+        // Caractère inconnu, on le garde comme "morceau" individuel
+        result.push({ hanzi: text[i], pinyin: '', fr: '', id: `unknown_${i}` });
+        i++;
+      }
+    }
+    return result;
+  };
+
+  const pickNext = () => {
+    setSubmitted(false);
+    setFeedback(null);
+    setUserInput('');
+    setTapBuilt([]);
+    setTapAvailable([]);
+
+    if (phaseDone) {
+      setCurrentExo(null);
+      return;
+    }
+
+    // Choisir une phrase pas encore réussie en priorité
+    const notSucceeded = phrases.filter(p => !phraseProgress[p.id] || phraseProgress[p.id] < 1);
+    const phrase = notSucceeded.length > 0
+      ? notSucceeded[Math.floor(Math.random() * notSucceeded.length)]
+      : phrases[Math.floor(Math.random() * phrases.length)];
+
+    // Choix aléatoire du sous-mode
+    const subModes = ['qcm_fr_pinyin', 'qcm_pinyin_fr', 'tap_fr_to_pinyin', 'tap_pinyin_to_fr', 'fill_pinyin'];
+    const subMode = subModes[Math.floor(Math.random() * subModes.length)];
+
+    if (subMode === 'qcm_fr_pinyin') {
+      // Affiche FR → choisis le pinyin correct
+      const distractors = phrases.filter(p => p.id !== phrase.id).sort(() => Math.random() - 0.5).slice(0, 3);
+      const opts = [phrase, ...distractors].sort(() => Math.random() - 0.5);
+      setCurrentExo({ subMode, phrase, options: opts });
+    } else if (subMode === 'qcm_pinyin_fr') {
+      // Affiche pinyin → choisis le FR correct
+      const distractors = phrases.filter(p => p.id !== phrase.id).sort(() => Math.random() - 0.5).slice(0, 3);
+      const opts = [phrase, ...distractors].sort(() => Math.random() - 0.5);
+      setCurrentExo({ subMode, phrase, options: opts });
+    } else if (subMode === 'tap_fr_to_pinyin' || subMode === 'tap_pinyin_to_fr') {
+      // Tap word : on doit reconstruire la phrase mot par mot
+      const tokens = tokenizePhrase(phrase);
+      if (tokens.length === 0) return pickNext(); // fallback
+      // Distracteurs : 2-3 mots d'autres phrases de la leçon
+      const otherTokens = phrases
+        .filter(p => p.id !== phrase.id)
+        .flatMap(p => tokenizePhrase(p))
+        .filter(t => !tokens.find(orig => orig.hanzi === t.hanzi));
+      const distractors = [...new Set(otherTokens.map(t => t.hanzi))]
+        .map(h => otherTokens.find(t => t.hanzi === h))
+        .sort(() => Math.random() - 0.5)
+        .slice(0, Math.min(3, Math.max(2, Math.floor(tokens.length / 3))));
+      const allTokens = [
+        ...tokens.map((t, i) => ({ ...t, key: `t_${i}_${Math.random()}`, isCorrect: true })),
+        ...distractors.map((t, i) => ({ ...t, key: `d_${i}_${Math.random()}`, isCorrect: false })),
+      ];
+      setTapAvailable(allTokens.sort(() => Math.random() - 0.5));
+      setCurrentExo({ subMode, phrase, tokens });
+    } else {
+      // fill_pinyin : tape le pinyin de la phrase
+      setCurrentExo({ subMode, phrase });
+    }
+  };
+
+  useEffect(() => {
+    if (!phaseDone && !currentExo) pickNext();
+  }, [phaseDone, refreshKey]);
+
+  // Phase complétée
+  if (phaseDone) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <div style={{ textAlign: 'center', padding: '3rem 1rem' }}>
+          <p style={{ fontSize: 56, margin: '0 0 16px', color: C.teal }}>✓</p>
+          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+            Phase 3 terminée
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Tu maîtrises {succeededCount} phrases sur {phrases.length}.
+            Phase 4 : renforcement sur tes points faibles.
+          </p>
+          <button onClick={onPhaseComplete} style={{
+            background: C.teal, color: C.bg, border: 'none',
+            padding: '12px 28px', borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>CONTINUER →</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentExo) return null;
+
+  const phrase = currentExo.phrase;
+
+  const markPhraseResult = (correct) => {
+    setSubmitted(true);
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    if (correct) {
+      const np = { ...phraseProgress, [phrase.id]: (phraseProgress[phrase.id] || 0) + 1 };
+      savePhraseProgress(np);
+      // Bonus : valider in_phrase pour les mots de la phrase
+      (phrase.words || []).forEach(wid => {
+        updateWordQuality(wid, 'in_phrase', true);
+      });
+    } else {
+      logError({
+        item_id: phrase.id, hanzi: phrase.hanzi, pinyin: phrase.pinyin, fr: phrase.fr,
+        facet: 'phrase_complete', mode: 'lesson_phase3',
+        error_type: 'structure', user_answer: '?', correct_answer: phrase.fr,
+      });
+    }
+    markActivity(1);
+  };
+
+  const handleQCMSelect = (correct) => {
+    if (submitted) return;
+    markPhraseResult(correct);
+  };
+
+  // Tap word handlers
+  const handleTapAdd = (tok) => {
+    if (submitted) return;
+    setTapBuilt(prev => [...prev, tok]);
+    setTapAvailable(prev => prev.filter(t => t.key !== tok.key));
+  };
+  const handleTapRemove = (tok) => {
+    if (submitted) return;
+    setTapBuilt(prev => prev.filter(t => t.key !== tok.key));
+    setTapAvailable(prev => [...prev, tok]);
+  };
+  const checkTapAnswer = () => {
+    if (submitted) return;
+    const userPhrase = tapBuilt.map(t => t.hanzi).join('');
+    const correctPhrase = currentExo.tokens.map(t => t.hanzi).join('');
+    markPhraseResult(userPhrase === correctPhrase);
+  };
+
+  // Fill pinyin handler
+  const normalizeInput = (s) => s.toLowerCase().trim()
+    .replace(/[āáǎà]/g, 'a').replace(/[ēéěè]/g, 'e').replace(/[īíǐì]/g, 'i')
+    .replace(/[ōóǒò]/g, 'o').replace(/[ūúǔù]/g, 'u').replace(/[ǖǘǚǜü]/g, 'u')
+    .replace(/\s+/g, '').replace(/[，。？！,.?!;]/g, '');
+
+  const handleFillSubmit = () => {
+    if (submitted) return;
+    markPhraseResult(normalizeInput(userInput) === normalizeInput(phrase.pinyin));
+  };
+
+  const handleNext = () => {
+    setRefreshKey(k => k + 1);
+    pickNext();
+  };
+
+  return (
+    <div className="slide-up">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0,
+        }}>← retour</button>
+        <span style={{ fontSize: 11, color: C.textDim, letterSpacing: 1 }}>
+          {succeededCount} / {targetPhrases} phrases
+        </span>
+      </div>
+
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+        PHASE 3 · PHRASES COMPLÈTES
+      </p>
+      <p style={{ fontSize: 16, margin: '0 0 16px', color: C.text }}>{lesson.theme}</p>
+
+      <div style={{ height: 3, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 20 }}>
+        <div style={{
+          width: `${(succeededCount / targetPhrases) * 100}%`, height: '100%',
+          background: `linear-gradient(90deg, ${C.teal}, ${C.purple})`, transition: 'width 0.3s',
+        }} />
+      </div>
+
+      {/* QCM FR → pinyin */}
+      {currentExo.subMode === 'qcm_fr_pinyin' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p style={{ fontSize: 16, color: C.text, margin: 0 }}>{phrase.fr}</p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Quel pinyin correspond ?
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {currentExo.options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) {
+                if (opt.id === phrase.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              }
+              return (
+                <button key={opt.id} onClick={() => handleQCMSelect(opt.id === phrase.id)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13, letterSpacing: 0.5,
+                  fontFamily: 'monospace',
+                }}>{opt.pinyin}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* QCM pinyin → FR */}
+      {currentExo.subMode === 'qcm_pinyin_fr' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(244,114,182,0.05), rgba(168,85,247,0.03))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '0 0 6px' }}>{phrase.hanzi}</p>
+            <p style={{ fontSize: 12, color: C.textDim, margin: 0 }}>{phrase.pinyin}</p>
+            {isTTSAvailable() && (
+              <button onClick={() => speak(phrase.hanzi)} style={{
+                marginTop: 10, background: 'transparent', border: `0.5px solid ${C.teal}`,
+                color: C.teal, padding: '4px 10px', borderRadius: 6, fontSize: 10, letterSpacing: 1,
+              }}>♪ ÉCOUTER</button>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Quelle traduction ?
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {currentExo.options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) {
+                if (opt.id === phrase.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              }
+              return (
+                <button key={opt.id} onClick={() => handleQCMSelect(opt.id === phrase.id)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                }}>{opt.fr}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Tap word : FR → pinyin OU pinyin → FR */}
+      {(currentExo.subMode === 'tap_fr_to_pinyin' || currentExo.subMode === 'tap_pinyin_to_fr') && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(251,191,36,0.05), rgba(244,114,182,0.03))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '18px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            {currentExo.subMode === 'tap_fr_to_pinyin' ? (
+              <p style={{ fontSize: 15, color: C.text, margin: 0 }}>{phrase.fr}</p>
+            ) : (
+              <p style={{ fontSize: 14, color: C.text, margin: 0, fontFamily: 'monospace', letterSpacing: 0.5 }}>{phrase.pinyin}</p>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 11, color: C.textDim, margin: '0 0 10px' }}>
+            Reconstitue la phrase chinoise
+          </p>
+
+          {/* Zone de construction */}
+          <div style={{
+            background: C.bgCard,
+            border: `1px solid ${submitted ? (feedback === 'correct' ? C.teal : C.red) : C.border}`,
+            borderRadius: 8, padding: 12, marginBottom: 12, minHeight: 60,
+            display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'flex-start',
+          }}>
+            {tapBuilt.length === 0 && (
+              <p style={{ color: C.textFaint, fontSize: 11, margin: 'auto', fontStyle: 'italic' }}>
+                Tappe les mots dans l'ordre...
+              </p>
+            )}
+            {tapBuilt.map(t => (
+              <button key={t.key} onClick={() => handleTapRemove(t)} disabled={submitted}
+                className="hanzi"
+                style={{
+                  background: C.bgElevated, border: `0.5px solid ${C.borderAccent}`,
+                  color: C.text, padding: '6px 10px', borderRadius: 6, fontSize: 16,
+                }}>{t.hanzi}</button>
+            ))}
+          </div>
+
+          {!submitted && (
+            <>
+              <p style={{ fontSize: 9, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>MOTS DISPO</p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14, minHeight: 70 }}>
+                {tapAvailable.map(t => (
+                  <button key={t.key} onClick={() => handleTapAdd(t)}
+                    className="hanzi"
+                    style={{
+                      background: C.bgCard, border: `0.5px solid ${C.border}`,
+                      color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 16,
+                    }}>{t.hanzi}</button>
+                ))}
+              </div>
+              <button onClick={checkTapAnswer} disabled={tapBuilt.length === 0} style={{
+                width: '100%', background: tapBuilt.length > 0 ? C.amber : C.border,
+                color: tapBuilt.length > 0 ? C.bg : C.textDim, border: 'none',
+                padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+                marginBottom: 12,
+              }}>VÉRIFIER</button>
+            </>
+          )}
+        </>
+      )}
+
+      {/* Fill pinyin */}
+      {currentExo.subMode === 'fill_pinyin' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(45,212,191,0.05), rgba(244,114,182,0.03))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '18px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '0 0 6px' }}>{phrase.hanzi}</p>
+            <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>{phrase.fr}</p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Tape le pinyin (tons optionnels)
+          </p>
+          <input
+            type="text" value={userInput} onChange={e => setUserInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleFillSubmit()}
+            disabled={submitted}
+            placeholder="ex: ni hao ma"
+            autoFocus
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: C.bgCard,
+              border: `0.5px solid ${submitted ? (feedback === 'correct' ? C.teal : C.red) : C.border}`,
+              color: C.text, padding: 14, borderRadius: 8, fontSize: 16,
+              fontFamily: 'monospace', letterSpacing: 1, marginBottom: 12,
+            }}
+          />
+          {!submitted && (
+            <button onClick={handleFillSubmit} disabled={!userInput.trim()} style={{
+              width: '100%', background: userInput.trim() ? C.amber : C.border,
+              color: userInput.trim() ? C.bg : C.textDim, border: 'none',
+              padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+              marginBottom: 12,
+            }}>VÉRIFIER</button>
+          )}
+        </>
+      )}
+
+      {/* Feedback global */}
+      {submitted && (
+        <>
+          <div style={{
+            padding: 12, borderRadius: 8, marginBottom: 12,
+            background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
+          }}>
+            <p style={{ margin: '0 0 6px', fontSize: 13, color: feedback === 'correct' ? C.teal : C.red, fontWeight: 500 }}>
+              {feedback === 'correct' ? '✓ Bien joué' : '✗ Pas tout à fait'}
+            </p>
+            <p className="hanzi" style={{ fontSize: 16, color: C.text, margin: '0 0 4px' }}>{phrase.hanzi}</p>
+            <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 4px' }}>{phrase.pinyin}</p>
+            <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>{phrase.fr}</p>
+          </div>
+          <button onClick={handleNext} style={{
+            width: '100%', background: C.teal, color: C.bg, border: 'none',
+            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>SUIVANT →</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ============================================================
+// LESSON PHASE 4 — Renforcement adaptatif
+// On identifie les mots de la leçon avec qualité < 60%
+// On boucle dessus avec QCM rapides + remplissage manuel jusqu'à >= 80%
+// Si tous sont déjà à 80%+, la phase est sautée immédiatement
+// ============================================================
+function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
+  const lesson = getLessonById(lessonId);
+  const words = useMemo(() => (lesson?.word_ids || []).map(id => getWordById(id)).filter(Boolean), [lessonId]);
+
+  const [refreshKey, setRefreshKey] = useState(0);
+  const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
+
+  // Mots faibles : < 80% de qualité
+  const weakWords = useMemo(() => {
+    return words.filter(w => getWordQualityScore(w.id, wordQuality) < 80);
+  }, [words, wordQuality]);
+
+  const [currentExo, setCurrentExo] = useState(null);
+  const [submitted, setSubmitted] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [userInput, setUserInput] = useState('');
+  const [stats, setStats] = useState({ done: 0, correct: 0 });
+
+  const phaseDone = weakWords.length === 0;
+
+  const distractorPool = useMemo(() => {
+    if (typeof VOCAB === 'undefined') return [];
+    return VOCAB.filter(w => w.theme === lesson?.theme_code).slice(0, 50);
+  }, [lesson]);
+
+  const pickNext = () => {
+    setSubmitted(false);
+    setFeedback(null);
+    setUserInput('');
+
+    if (weakWords.length === 0) {
+      setCurrentExo(null);
+      return;
+    }
+
+    // Choisir le mot le plus faible
+    const sorted = [...weakWords].sort((a, b) =>
+      getWordQualityScore(a.id, wordQuality) - getWordQualityScore(b.id, wordQuality)
+    );
+    const word = sorted[Math.floor(Math.random() * Math.min(2, sorted.length))];
+
+    // Choisir aléatoirement le type d'exo
+    const types = ['qcm_zh_fr', 'qcm_fr_zh', 'fill_manual'];
+    if (isTTSAvailable()) types.push('audio');
+    const modality = types[Math.floor(Math.random() * types.length)];
+
+    if (modality === 'qcm_zh_fr' || modality === 'qcm_fr_zh') {
+      let candidates = distractorPool.filter(w => w.id !== word.id);
+      if (candidates.length < 3) {
+        candidates = (typeof VOCAB !== 'undefined' ? VOCAB : []).filter(w => w.id !== word.id);
+      }
+      const distractors = [...candidates].sort(() => Math.random() - 0.5).slice(0, 3);
+      const all = [...distractors, word].sort(() => Math.random() - 0.5);
+      setCurrentExo({ word, modality, options: all });
+    } else if (modality === 'audio') {
+      const audioMode = Math.random() < 0.5 ? 'pinyin' : 'fr';
+      setCurrentExo({ word, modality, audioMode });
+      setTimeout(() => speak(word.hanzi), 400);
+    } else {
+      setCurrentExo({ word, modality });
+    }
+  };
+
+  useEffect(() => {
+    if (!phaseDone && !currentExo) pickNext();
+  }, [phaseDone, refreshKey]);
+
+  if (!lesson) return null;
+
+  if (phaseDone) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <div style={{ textAlign: 'center', padding: '3rem 1rem' }}>
+          <p style={{ fontSize: 56, margin: '0 0 16px', color: C.teal }}>✓</p>
+          <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+            Phase 4 terminée
+          </p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+            Tous tes mots sont à 80%+ de qualité. Phase 5 (texte de synthèse) à venir au prochain sprint.
+          </p>
+          <button onClick={onPhaseComplete} style={{
+            background: C.teal, color: C.bg, border: 'none',
+            padding: '12px 28px', borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>TERMINER LA LEÇON</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentExo) return null;
+  const { word, modality, options } = currentExo;
+
+  const normalizeInput = (s) => s.toLowerCase().trim()
+    .replace(/[āáǎà]/g, 'a').replace(/[ēéěè]/g, 'e').replace(/[īíǐì]/g, 'i')
+    .replace(/[ōóǒò]/g, 'o').replace(/[ūúǔù]/g, 'u').replace(/[ǖǘǚǜü]/g, 'u')
+    .replace(/\s+/g, '');
+
+  const handleQCMSelect = (opt) => {
+    if (submitted) return;
+    setSubmitted(true);
+    const correct = opt.id === word.id;
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    updateWordQuality(word.id, modality, correct);
+    if (!correct) {
+      logError({
+        item_id: word.id, hanzi: word.hanzi, pinyin: word.pinyin, fr: word.fr,
+        facet: modality, mode: 'lesson_phase4',
+        error_type: detectErrorType(word, opt, 'qcm'),
+        user_answer: opt.fr || opt.hanzi, correct_answer: word.fr,
+        confused_with: opt.hanzi,
+      });
+    }
+    markActivity(1);
+  };
+
+  const handleFillSubmit = () => {
+    if (submitted) return;
+    setSubmitted(true);
+    const correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    updateWordQuality(word.id, 'fill_manual', correct);
+    markActivity(1);
+  };
+
+  const handleAudioSubmit = () => {
+    if (submitted) return;
+    setSubmitted(true);
+    const audioMode = currentExo.audioMode;
+    let correct = false;
+    if (audioMode === 'pinyin') {
+      correct = normalizeInput(userInput) === normalizeInput(word.pinyin);
+    } else {
+      const userClean = userInput.toLowerCase().trim();
+      const variants = word.fr.toLowerCase().split(/[,;]/).map(s => s.trim());
+      correct = variants.some(v => v === userClean) ||
+                userClean.length >= 3 && variants.some(v => v.includes(userClean) || userClean.includes(v));
+    }
+    setFeedback(correct ? 'correct' : 'wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
+    updateWordQuality(word.id, 'audio', correct);
+    markActivity(1);
+  };
+
+  const handleNext = () => {
+    setRefreshKey(k => k + 1);
+    pickNext();
+  };
+
+  const avgQ = words.length > 0 ? words.reduce((s, w) => s + getWordQualityScore(w.id, wordQuality), 0) / words.length : 0;
+
+  return (
+    <div className="slide-up">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0,
+        }}>← retour</button>
+        <span style={{ fontSize: 11, color: C.textDim, letterSpacing: 1 }}>
+          {weakWords.length} mots à renforcer
+        </span>
+      </div>
+
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+        PHASE 4 · RENFORCEMENT
+      </p>
+      <p style={{ fontSize: 16, margin: '0 0 16px', color: C.text }}>
+        {lesson.theme} · qualité moy. {Math.round(avgQ)}%
+      </p>
+
+      <div style={{ height: 3, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 20 }}>
+        <div style={{
+          width: `${avgQ}%`, height: '100%',
+          background: `linear-gradient(90deg, ${C.amber}, ${C.teal})`, transition: 'width 0.3s',
+        }} />
+      </div>
+
+      {/* Tag mot faible */}
+      <div style={{ textAlign: 'center', marginBottom: 14 }}>
+        <span style={{
+          fontSize: 9, padding: '4px 10px', border: `0.5px solid ${C.amber}`,
+          color: C.amber, borderRadius: 12, letterSpacing: 1.5,
+        }}>QUALITÉ ACTUELLE : {Math.round(getWordQualityScore(word.id, wordQuality))}%</span>
+      </div>
+
+      {/* QCM zh → fr */}
+      {modality === 'qcm_zh_fr' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(45,212,191,0.08), rgba(168,85,247,0.06))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 44, margin: 0, color: C.text, fontWeight: 300 }}>{word.hanzi}</p>
+            <p style={{ fontSize: 12, color: C.textDim, margin: '8px 0 0' }}>{word.pinyin}</p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>Quel sens ?</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) { if (opt.id === word.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; } }
+              return (
+                <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                }}>{opt.fr}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* QCM fr → zh */}
+      {modality === 'qcm_fr_zh' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(244,114,182,0.06), rgba(168,85,247,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '20px 16px', marginBottom: 16, textAlign: 'center',
+          }}>
+            <p style={{ fontSize: 18, margin: 0, color: C.text }}>{word.fr}</p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>Quel hanzi ?</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) { if (opt.id === word.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; } }
+              return (
+                <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <span className="hanzi" style={{ fontSize: 18 }}>{opt.hanzi}</span>
+                  <span style={{ fontSize: 10, color: C.textDim }}>{opt.pinyin}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Fill manual */}
+      {modality === 'fill_manual' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(251,191,36,0.06), rgba(244,114,182,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+          }}>
+            <p className="hanzi" style={{ fontSize: 36, margin: '0 0 6px', color: C.text }}>{word.hanzi}</p>
+            <p style={{ fontSize: 12, color: C.textDim, margin: 0 }}>({word.fr})</p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>Tape le pinyin</p>
+          <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleFillSubmit()}
+            disabled={submitted} placeholder="ex: ni hao" autoFocus
+            style={{
+              width: '100%', boxSizing: 'border-box', background: C.bgCard,
+              border: `0.5px solid ${submitted ? (feedback === 'correct' ? C.teal : C.red) : C.border}`,
+              color: C.text, padding: 14, borderRadius: 8, fontSize: 16,
+              fontFamily: 'monospace', letterSpacing: 1, marginBottom: 12,
+            }}
+          />
+          {!submitted && (
+            <button onClick={handleFillSubmit} disabled={!userInput.trim()} style={{
+              width: '100%', background: userInput.trim() ? C.amber : C.border,
+              color: userInput.trim() ? C.bg : C.textDim, border: 'none',
+              padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5, marginBottom: 12,
+            }}>VÉRIFIER</button>
+          )}
+        </>
+      )}
+
+      {/* Audio */}
+      {modality === 'audio' && currentExo.audioMode && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(168,85,247,0.08), rgba(45,212,191,0.05))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+          }}>
+            <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 12px' }}>ÉCOUTE</p>
+            <button onClick={() => speak(word.hanzi)} style={{
+              background: C.purple, color: C.bg, border: 'none',
+              width: 70, height: 70, borderRadius: '50%', fontSize: 28, marginBottom: 4,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 0 20px rgba(168,85,247,0.3)',
+            }}>♪</button>
+            {submitted && (
+              <p className="hanzi" style={{ fontSize: 20, color: C.text, margin: '12px 0 0' }}>{word.hanzi}</p>
+            )}
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            {currentExo.audioMode === 'pinyin' ? 'Tape le pinyin' : 'Tape la traduction'}
+          </p>
+          <input type="text" value={userInput} onChange={e => setUserInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAudioSubmit()}
+            disabled={submitted}
+            placeholder={currentExo.audioMode === 'pinyin' ? 'ex: ni hao' : 'ex: bonjour'}
+            autoFocus
+            style={{
+              width: '100%', boxSizing: 'border-box', background: C.bgCard,
+              border: `0.5px solid ${submitted ? (feedback === 'correct' ? C.teal : C.red) : C.border}`,
+              color: C.text, padding: 14, borderRadius: 8, fontSize: 16,
+              fontFamily: currentExo.audioMode === 'pinyin' ? 'monospace' : 'inherit',
+              letterSpacing: currentExo.audioMode === 'pinyin' ? 1 : 'normal',
+              marginBottom: 12,
+            }}
+          />
+          {!submitted && (
+            <button onClick={handleAudioSubmit} disabled={!userInput.trim()} style={{
+              width: '100%', background: userInput.trim() ? C.purple : C.border,
+              color: userInput.trim() ? C.bg : C.textDim, border: 'none',
+              padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5, marginBottom: 12,
+            }}>VÉRIFIER</button>
+          )}
+        </>
+      )}
+
+      {submitted && (
+        <>
+          <div style={{
+            padding: 12, borderRadius: 8, marginBottom: 12,
+            background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
+          }}>
+            <p style={{ margin: 0, fontSize: 13, color: feedback === 'correct' ? C.teal : C.red, fontWeight: 500 }}>
+              {feedback === 'correct' ? '✓ Bien' : '✗ À retravailler'}
+            </p>
+            <p style={{ margin: '4px 0 0', fontSize: 11, color: C.textDim }}>
+              <span className="hanzi">{word.hanzi}</span> · {word.pinyin} · {word.fr}
+            </p>
+          </div>
+          <button onClick={handleNext} style={{
+            width: '100%', background: C.teal, color: C.bg, border: 'none',
+            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>SUIVANT →</button>
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// ============================================================
+// LESSON PHASE 5 — Texte de synthèse via IA
+// On génère un mini-texte qui utilise les mots de la leçon, plus quelques questions
+// Si offline ou si la génération échoue : fallback avec les phrases existantes
+// ============================================================
+function LessonPhase5Screen({ lessonId, onBack, onPhaseComplete }) {
+  const lesson = getLessonById(lessonId);
+  const words = useMemo(() => (lesson?.word_ids || []).map(id => getWordById(id)).filter(Boolean), [lessonId]);
+  const phrases = useMemo(() => (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean), [lessonId]);
+  const isOnline = useOnlineStatus();
+
+  const [text, setText] = useState(null); // { text_zh, text_pinyin, text_fr, new_words, questions }
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [stage, setStage] = useState('reading'); // 'reading' | 'questions' | 'done'
+  const [showPinyin, setShowPinyin] = useState(false);
+  const [showFr, setShowFr] = useState(false);
+  const [activeQuestion, setActiveQuestion] = useState(0);
+  const [answers, setAnswers] = useState([]); // index sélectionné par question
+  const [submitted, setSubmitted] = useState([]); // si chaque Q a été soumise
+
+  const lessonTextKey = `hsk_phase5_${lessonId}`;
+
+  // Charger texte caché OU générer
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // 1. Tenter récup en cache
+      try {
+        const cached = localStorage.getItem(lessonTextKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed.text_zh) {
+            if (!cancelled) {
+              setText(parsed);
+              setLoading(false);
+              return;
+            }
+          }
+        }
+      } catch {}
+
+      // 2. Sinon générer (online uniquement)
+      if (!isOnline) {
+        if (!cancelled) {
+          setError('offline');
+          setLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const wordList = words.map(w => `${w.hanzi}(${w.pinyin}, ${w.fr})`).join(', ');
+        const resp = await fetch('https://hsk-backend.tom-delaine14.workers.dev/generate-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            known_words: words.map(w => w.hanzi),
+            hsk_level: 2,
+            theme: `${lesson.theme} — utilise les mots suivants : ${wordList}`,
+            length: 'short',
+            question_count: 3,
+          }),
+        });
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (!data.text_zh) throw new Error('Réponse incomplète');
+
+        if (!cancelled) {
+          setText(data);
+          setLoading(false);
+          // Cache pour réouverture sans regénérer
+          try { localStorage.setItem(lessonTextKey, JSON.stringify(data)); } catch {}
+        }
+      } catch (e) {
+        console.warn('Phase 5 generation failed:', e);
+        if (!cancelled) {
+          setError(e.message || 'Erreur de génération');
+          setLoading(false);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [lessonId, isOnline]);
+
+  if (!lesson) return null;
+
+  // Loading
+  if (loading) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+          PHASE 5 · TEXTE DE SYNTHÈSE
+        </p>
+        <p style={{ fontSize: 16, margin: '0 0 24px', color: C.text }}>{lesson.theme}</p>
+
+        <div style={{
+          textAlign: 'center', padding: '3rem 1rem',
+          border: `0.5px solid ${C.border}`, borderRadius: 12,
+        }}>
+          <p className="pulse" style={{ fontSize: 36, color: C.purple, margin: '0 0 16px' }}>✦</p>
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 4px' }}>
+            Génération du texte par IA…
+          </p>
+          <p style={{ fontSize: 11, color: C.textFaint, margin: 0 }}>
+            (10-20 secondes max)
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Error
+  if (error) {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+        <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+          PHASE 5 · TEXTE DE SYNTHÈSE
+        </p>
+        <p style={{ fontSize: 16, margin: '0 0 24px', color: C.text }}>{lesson.theme}</p>
+
+        <div style={{
+          background: 'rgba(239,68,68,0.06)',
+          border: `0.5px solid ${C.red}`,
+          borderRadius: 12, padding: 18, marginBottom: 16,
+        }}>
+          <p style={{ fontSize: 13, color: C.red, margin: '0 0 8px', fontWeight: 500 }}>
+            {error === 'offline' ? '⚠ Mode offline' : '⚠ Génération impossible'}
+          </p>
+          <p style={{ fontSize: 12, color: C.textDim, margin: 0, lineHeight: 1.5 }}>
+            {error === 'offline'
+              ? 'Cette phase a besoin d\'internet pour générer un texte adapté à ta leçon. Reviens en ligne et réessaie.'
+              : 'Le service IA n\'a pas pu générer le texte. Tu peux passer la phase ou réessayer plus tard.'}
+          </p>
+        </div>
+
+        <button onClick={() => { setError(null); setLoading(true); }} style={{
+          width: '100%', background: 'transparent', border: `0.5px solid ${C.teal}`,
+          color: C.teal, padding: 12, borderRadius: 8, fontSize: 13, letterSpacing: 0.5,
+          marginBottom: 8,
+        }}>↻ RÉESSAYER</button>
+
+        <button onClick={onPhaseComplete} style={{
+          width: '100%', background: C.purple, color: C.bg, border: 'none',
+          padding: 12, borderRadius: 8, fontSize: 13, fontWeight: 600, letterSpacing: 0.5,
+        }}>PASSER LA PHASE 5</button>
+      </div>
+    );
+  }
+
+  // === PHASE 5 — STAGE 'reading' : afficher le texte ===
+  if (stage === 'reading') {
+    return (
+      <div className="slide-up">
+        <button onClick={onBack} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+        }}>← retour</button>
+
+        <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+          PHASE 5 · TEXTE DE SYNTHÈSE
+        </p>
+        <p style={{ fontSize: 16, margin: '0 0 16px', color: C.text }}>{lesson.theme}</p>
+
+        {/* Texte chinois */}
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(168,85,247,0.06), rgba(45,212,191,0.04))',
+          border: `0.5px solid ${C.borderAccent}`,
+          borderRadius: 12, padding: 18, marginBottom: 12,
+        }}>
+          <p className="hanzi" style={{
+            fontSize: 22, color: C.text, margin: 0, lineHeight: 1.7, fontWeight: 400,
+          }}>{text.text_zh}</p>
+
+          {showPinyin && (
+            <p style={{
+              fontSize: 13, color: C.textDim, margin: '14px 0 0', lineHeight: 1.6,
+              fontFamily: 'monospace', letterSpacing: 0.3,
+            }}>{text.text_pinyin}</p>
+          )}
+
+          {showFr && (
+            <p style={{
+              fontSize: 13, color: C.textFaint, margin: '14px 0 0', lineHeight: 1.6, fontStyle: 'italic',
+            }}>{text.text_fr}</p>
+          )}
+        </div>
+
+        {/* Boutons toolbar */}
+        <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+          {isTTSAvailable() && (
+            <button onClick={() => speak(text.text_zh)} style={{
+              flex: 1, minWidth: 90, background: 'transparent',
+              border: `0.5px solid ${C.teal}`, color: C.teal,
+              padding: '8px 12px', borderRadius: 6, fontSize: 11, letterSpacing: 0.5,
+            }}>♪ ÉCOUTER</button>
+          )}
+          <button onClick={() => setShowPinyin(!showPinyin)} style={{
+            flex: 1, minWidth: 90, background: showPinyin ? C.purple : 'transparent',
+            border: `0.5px solid ${C.purple}`, color: showPinyin ? C.bg : C.purple,
+            padding: '8px 12px', borderRadius: 6, fontSize: 11, letterSpacing: 0.5,
+          }}>{showPinyin ? '✓ ' : ''}PINYIN</button>
+          <button onClick={() => setShowFr(!showFr)} style={{
+            flex: 1, minWidth: 90, background: showFr ? C.amber : 'transparent',
+            border: `0.5px solid ${C.amber}`, color: showFr ? C.bg : C.amber,
+            padding: '8px 12px', borderRadius: 6, fontSize: 11, letterSpacing: 0.5,
+          }}>{showFr ? '✓ ' : ''}TRADUCTION</button>
+        </div>
+
+        {/* Mots nouveaux (si présents) */}
+        {text.new_words && text.new_words.length > 0 && (
+          <>
+            <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 8px' }}>
+              MOTS NOUVEAUX
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              {text.new_words.map((nw, i) => (
+                <div key={i} style={{
+                  background: C.bgCard, border: `0.5px solid ${C.border}`,
+                  borderLeft: `2px solid ${C.amber}`,
+                  padding: 10, display: 'flex', alignItems: 'center', gap: 10,
+                }}>
+                  <span className="hanzi" style={{ fontSize: 18, color: C.text, minWidth: 50 }}>
+                    {nw.hanzi}
+                  </span>
+                  <span style={{ fontSize: 11, color: C.textDim, minWidth: 70 }}>
+                    {nw.pinyin}
+                  </span>
+                  <span style={{ fontSize: 12, color: C.textFaint, flex: 1 }}>
+                    {nw.fr}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* CTA */}
+        {text.questions && text.questions.length > 0 ? (
+          <button onClick={() => setStage('questions')} style={{
+            width: '100%', background: C.teal, color: C.bg, border: 'none',
+            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>RÉPONDRE AUX QUESTIONS →</button>
+        ) : (
+          <button onClick={() => { setStage('done'); }} style={{
+            width: '100%', background: C.teal, color: C.bg, border: 'none',
+            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>TERMINER LA LEÇON →</button>
+        )}
+      </div>
+    );
+  }
+
+  // === STAGE 'questions' ===
+  if (stage === 'questions') {
+    const q = text.questions[activeQuestion];
+    const userAnswer = answers[activeQuestion];
+    const isSubmitted = submitted[activeQuestion];
+    const isLast = activeQuestion === text.questions.length - 1;
+
+    const submit = () => {
+      if (userAnswer === undefined) return;
+      const ns = [...submitted];
+      ns[activeQuestion] = true;
+      setSubmitted(ns);
+      const correct = userAnswer === q.correct_index;
+      if (!correct) {
+        logError({
+          item_id: `phase5_q${activeQuestion}`,
+          hanzi: q.q_zh, pinyin: q.q_pinyin, fr: q.q_fr,
+          facet: 'phrase_complete', mode: 'lesson_phase5',
+          error_type: 'unknown', user_answer: q.options_zh[userAnswer],
+          correct_answer: q.options_zh[q.correct_index],
+        });
+      }
+      markActivity(1);
+    };
+
+    const next = () => {
+      if (!isLast) {
+        setActiveQuestion(activeQuestion + 1);
+      } else {
+        setStage('done');
+      }
+    };
+
+    return (
+      <div className="slide-up">
+        <button onClick={() => setStage('reading')} style={{
+          background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 12,
+        }}>← retour au texte</button>
+
+        <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+          PHASE 5 · COMPRÉHENSION
+        </p>
+        <p style={{ fontSize: 14, margin: '0 0 16px', color: C.textDim }}>
+          Question {activeQuestion + 1} / {text.questions.length}
+        </p>
+
+        <div style={{ height: 3, background: C.border, borderRadius: 2, overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{
+            width: `${((activeQuestion + (isSubmitted ? 1 : 0.5)) / text.questions.length) * 100}%`,
+            height: '100%',
+            background: `linear-gradient(90deg, ${C.teal}, ${C.purple})`,
+            transition: 'width 0.3s',
+          }} />
+        </div>
+
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(244,114,182,0.04))',
+          border: `0.5px solid ${C.borderAccent}`,
+          borderRadius: 12, padding: 16, marginBottom: 16,
+        }}>
+          <p className="hanzi" style={{ fontSize: 18, color: C.text, margin: '0 0 6px', lineHeight: 1.5 }}>
+            {q.q_zh}
+          </p>
+          <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 4px' }}>
+            {q.q_pinyin}
+          </p>
+          <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+            {q.q_fr}
+          </p>
+        </div>
+
+        {/* Options */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          {q.options_zh.map((opt, i) => {
+            let borderColor = C.border, bg = C.bgCard;
+            if (isSubmitted) {
+              if (i === q.correct_index) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              else if (i === userAnswer) { borderColor = C.red; bg = 'rgba(239,68,68,0.08)'; }
+            } else if (userAnswer === i) {
+              borderColor = C.teal;
+            }
+            return (
+              <button
+                key={i}
+                onClick={() => {
+                  if (isSubmitted) return;
+                  const na = [...answers];
+                  na[activeQuestion] = i;
+                  setAnswers(na);
+                }}
+                disabled={isSubmitted}
+                style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left',
+                }}
+              >
+                <p className="hanzi" style={{ fontSize: 16, margin: '0 0 2px' }}>{opt}</p>
+                {q.options_pinyin && q.options_pinyin[i] && (
+                  <p style={{ fontSize: 10, color: C.textDim, margin: 0 }}>{q.options_pinyin[i]}</p>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Action button */}
+        {!isSubmitted ? (
+          <button onClick={submit} disabled={userAnswer === undefined} style={{
+            width: '100%',
+            background: userAnswer !== undefined ? C.teal : C.border,
+            color: userAnswer !== undefined ? C.bg : C.textDim,
+            border: 'none', padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+          }}>VALIDER</button>
+        ) : (
+          <>
+            <div style={{
+              padding: 12, borderRadius: 8, marginBottom: 12,
+              background: userAnswer === q.correct_index ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
+              border: `0.5px solid ${userAnswer === q.correct_index ? C.teal : C.red}`,
+            }}>
+              <p style={{ margin: 0, fontSize: 13, color: userAnswer === q.correct_index ? C.teal : C.red, fontWeight: 500 }}>
+                {userAnswer === q.correct_index ? '✓ Correct' : '✗ La bonne réponse :'}
+              </p>
+              {userAnswer !== q.correct_index && (
+                <p className="hanzi" style={{ margin: '4px 0 0', fontSize: 14, color: C.text }}>
+                  {q.options_zh[q.correct_index]}
+                </p>
+              )}
+            </div>
+            <button onClick={next} style={{
+              width: '100%', background: C.teal, color: C.bg, border: 'none',
+              padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+            }}>{isLast ? 'TERMINER →' : 'QUESTION SUIVANTE →'}</button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // === STAGE 'done' ===
+  const correctCount = text.questions ? answers.filter((a, i) => a === text.questions[i].correct_index).length : 0;
+  const totalQ = text.questions ? text.questions.length : 0;
+
+  return (
+    <div className="slide-up">
+      <button onClick={onBack} style={{
+        background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+      }}>← retour</button>
+
+      <div style={{ textAlign: 'center', padding: '3rem 1rem' }}>
+        <p style={{ fontSize: 56, margin: '0 0 16px', color: C.teal }}>✓</p>
+        <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+          Leçon terminée !
+        </p>
+        {totalQ > 0 && (
+          <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 8px', lineHeight: 1.6 }}>
+            {correctCount} / {totalQ} questions correctes
+          </p>
+        )}
+        <p style={{ fontSize: 12, color: C.textFaint, margin: '0 0 24px', lineHeight: 1.6 }}>
+          Tu as parcouru les 5 phases de cette leçon. Bravo, tu peux passer à la suivante.
+        </p>
+        <button onClick={onPhaseComplete} style={{
+          background: C.teal, color: C.bg, border: 'none',
+          padding: '12px 28px', borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+        }}>RETOUR À LA LEÇON</button>
+      </div>
+    </div>
+  );
+}
+// Mount
     const rootEl = document.getElementById('root');
     const loadingEl = document.getElementById('loading');
     ReactDOM.createRoot(rootEl).render(<HSKApp />);
