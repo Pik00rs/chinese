@@ -7034,8 +7034,28 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
   if (!lesson) return null;
 
   const wordCount = lesson.word_ids.length;
+  const phraseCount = (lesson.phrase_ids || []).length + (lesson.extra_ai_phrases || []).length;
+  const usablePhraseCount = (lesson.phrase_ids || [])
+    .map(id => getPhraseById(id))
+    .filter(p => p && p.hanzi.length <= 14).length
+    + (lesson.extra_ai_phrases || []).filter(p => p.hanzi.length <= 14).length;
   const ttsAvailable = isTTSAvailable();
   const currentIntensity = getLessonIntensity(lessonId);
+
+  // Estimations approximatives par phase
+  // Phase 1: word × modalities × 0.4min
+  // Phase 2: phrases × passes (× 2 si bidirectionnel) × 0.3min
+  // Phase 3: phrases × ratio × passes × 0.4min
+  const estimateMinutes = (intensity) => {
+    let mods, p2Passes, p2Both, p3Ratio, p3Passes;
+    if (intensity === 'light') { mods = 2; p2Passes = 1; p2Both = false; p3Ratio = 0.6; p3Passes = 1; }
+    else if (intensity === 'deep') { mods = ttsAvailable ? 4 : 3; p2Passes = 2; p2Both = true; p3Ratio = 1.0; p3Passes = 2; }
+    else { mods = 3; p2Passes = 1; p2Both = true; p3Ratio = 1.0; p3Passes = 1; }
+    const p1 = wordCount * mods * 0.4;
+    const p2 = usablePhraseCount * p2Passes * (p2Both ? 2 : 1) * 0.3;
+    const p3 = phraseCount * p3Ratio * p3Passes * 0.4;
+    return Math.round(p1 + p2 + p3);
+  };
 
   const options = [
     {
@@ -7043,37 +7063,32 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
       label: 'Léger',
       icon: '◐',
       color: C.teal,
-      modalities: 2,
-      validations: wordCount * 2,
-      time: `~${Math.round(wordCount * 2 * 0.4)} min`,
-      desc: 'QCM hanzi→sens + écriture pinyin',
-      detail: 'Idéal pour découvrir vite ou réviser',
+      time: `~${estimateMinutes('light')} min`,
+      desc: 'Phase 1 : QCM hanzi→sens + écriture pinyin',
+      detail: 'Phase 2 : 1 réussite/phrase · Phase 3 : 60% des phrases',
+      tagline: 'Pour découvrir vite ou réviser',
     },
     {
       key: 'normal',
       label: 'Normal',
       icon: '●',
       color: C.purple,
-      modalities: 3,
-      validations: wordCount * 3,
-      time: `~${Math.round(wordCount * 3 * 0.4)} min`,
-      desc: 'QCM bidirectionnels + écriture pinyin',
-      detail: 'Apprentissage solide, recommandé',
+      time: `~${estimateMinutes('normal')} min`,
+      desc: 'Phase 1 : QCM bidirectionnels + écriture pinyin',
+      detail: 'Phase 2 : 1 réussite par sens · Phase 3 : 100% des phrases',
+      tagline: 'Apprentissage solide, recommandé',
     },
     {
       key: 'deep',
       label: 'Approfondi',
       icon: '◉',
       color: C.amber,
-      modalities: ttsAvailable ? 4 : 3,
-      validations: wordCount * (ttsAvailable ? 4 : 3),
-      time: `~${Math.round(wordCount * (ttsAvailable ? 4 : 3) * 0.4)} min`,
+      time: `~${estimateMinutes('deep')} min`,
       desc: ttsAvailable
-        ? 'Tout : QCM ↔, écriture, audio'
-        : 'Tout : QCM ↔, écriture (audio non dispo)',
-      detail: ttsAvailable
-        ? 'Maîtrise complète multi-modale'
-        : 'Identique au normal sans TTS',
+        ? 'Phase 1 : tout (QCM ↔, écriture, audio)'
+        : 'Phase 1 : tout (QCM ↔, écriture)',
+      detail: 'Phase 2 : 2 réussites par sens · Phase 3 : 100% × 2 réussites',
+      tagline: 'Maîtrise complète',
     },
   ];
 
@@ -7089,13 +7104,13 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
       <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
         Quelle intensité ?
       </p>
-      <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
-        Tu apprends <span style={{ color: C.text, fontWeight: 500 }}>{wordCount} mots</span> dans cette leçon.
-        Choisis ton niveau d'approfondissement pour la Phase 1.
-        Tu pourras le changer plus tard.
+      <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 16px', lineHeight: 1.6 }}>
+        Tu apprends <span style={{ color: C.text, fontWeight: 500 }}>{wordCount} mots</span> et{' '}
+        <span style={{ color: C.text, fontWeight: 500 }}>{phraseCount} phrases</span> dans cette leçon.
+        Le niveau choisi <span style={{ color: C.teal, fontWeight: 500 }}>s'applique à toutes les phases</span> (mots, phrases QCM, phrases tap).
       </p>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
         {options.map(opt => {
           const isActive = currentIntensity === opt.key;
           return (
@@ -7103,10 +7118,10 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
               background: isActive ? `${opt.color}11` : C.bgCard,
               border: `0.5px solid ${isActive ? opt.color : C.border}`,
               borderLeft: `3px solid ${opt.color}`,
-              color: C.text, padding: 16, borderRadius: 8, textAlign: 'left',
-              display: 'flex', alignItems: 'flex-start', gap: 14,
+              color: C.text, padding: 14, borderRadius: 8, textAlign: 'left',
+              display: 'flex', alignItems: 'flex-start', gap: 12,
             }}>
-              <span style={{ fontSize: 24, color: opt.color, lineHeight: 1, marginTop: 2 }}>
+              <span style={{ fontSize: 22, color: opt.color, lineHeight: 1, marginTop: 2 }}>
                 {opt.icon}
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -7118,14 +7133,17 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
                     </span>}
                   </p>
                   <span style={{ fontSize: 11, color: opt.color, fontWeight: 500 }}>
-                    {opt.validations} exos · {opt.time}
+                    {opt.time}
                   </span>
                 </div>
-                <p style={{ fontSize: 12, color: C.textDim, margin: '0 0 4px' }}>
+                <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 2px', lineHeight: 1.4 }}>
                   {opt.desc}
                 </p>
-                <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+                <p style={{ fontSize: 11, color: C.textDim, margin: '0 0 4px', lineHeight: 1.4 }}>
                   {opt.detail}
+                </p>
+                <p style={{ fontSize: 10, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+                  {opt.tagline}
                 </p>
               </div>
             </button>
