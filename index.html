@@ -1013,6 +1013,8 @@ function buildSessionQueue(learnerState, profile, allItems) {
 function HSKApp() {
   const [screen, setScreen] = useState('home');
   const [selectedLessonId, setSelectedLessonId] = useState(null);
+  const [modeConfig, setModeConfig] = useState(null); // { lessonIds, questionCount, mode }
+  const [pendingMode, setPendingMode] = useState(null); // mode en attente de config
   const [learnerState, setLearnerState] = useState({});
   const [profile, setProfile] = useState({
     name: 'Matin transport',
@@ -1194,6 +1196,10 @@ function HSKApp() {
                 } else {
                   setScreen(`lessonphase${targetPhase}`);
                 }
+              } else if (['flashcards', 'qcm', 'smartsentence', 'reading', 'sentencebuilder'].includes(m)) {
+                // Modes libres : passer par l'écran de configuration
+                setPendingMode(m);
+                setScreen('modeconfig');
               } else {
                 setScreen(m);
               }
@@ -1201,6 +1207,29 @@ function HSKApp() {
             onStats={() => setScreen('stats')}
           />
         )}
+        {screen === 'modeconfig' && pendingMode && (() => {
+          const labels = {
+            flashcards: 'Flashcards',
+            qcm: 'QCM mots',
+            smartsentence: 'Phrases (IA)',
+            reading: 'Lecture',
+            sentencebuilder: 'Construction de phrases',
+          };
+          return (
+            <ModeConfigScreen
+              modeKey={pendingMode}
+              modeLabel={labels[pendingMode] || pendingMode}
+              onCancel={() => {
+                setPendingMode(null);
+                setScreen('home');
+              }}
+              onStart={(cfg) => {
+                setModeConfig({ ...cfg, mode: pendingMode });
+                setScreen(pendingMode);
+              }}
+            />
+          );
+        })()}
         {screen === 'session' && (
           <SessionScreen
             profile={profile}
@@ -1236,9 +1265,10 @@ function HSKApp() {
             profile={{ ...profile, interests: profile.interests, _modeOverride: 'hanzi_to_sens' }}
             learnerState={learnerState}
             setLearnerState={setLearnerState}
-            onComplete={handleSessionComplete}
-            onQuit={() => setScreen('home')}
+            onComplete={() => { setModeConfig(null); setPendingMode(null); handleSessionComplete(); }}
+            onQuit={() => { setModeConfig(null); setPendingMode(null); setScreen('home'); }}
             mode="flashcards"
+            modeConfig={modeConfig}
           />
         )}
         {screen === 'qcm' && (
@@ -1246,9 +1276,10 @@ function HSKApp() {
             profile={profile}
             learnerState={learnerState}
             setLearnerState={setLearnerState}
-            onComplete={handleSessionComplete}
-            onQuit={() => setScreen('home')}
+            onComplete={() => { setModeConfig(null); setPendingMode(null); handleSessionComplete(); }}
+            onQuit={() => { setModeConfig(null); setPendingMode(null); setScreen('home'); }}
             mode="qcm"
+            modeConfig={modeConfig}
           />
         )}
         {screen === 'smartsentence' && (
@@ -1256,14 +1287,16 @@ function HSKApp() {
             profile={profile}
             learnerState={learnerState}
             setLearnerState={setLearnerState}
-            onBack={() => setScreen('home')}
+            onBack={() => { setModeConfig(null); setPendingMode(null); setScreen('home'); }}
+            modeConfig={modeConfig}
           />
         )}
         {screen === 'reading' && (
           <ReadingScreen
             profile={profile}
             learnerState={learnerState}
-            onBack={() => setScreen('home')}
+            onBack={() => { setModeConfig(null); setPendingMode(null); setScreen('home'); }}
+            modeConfig={modeConfig}
           />
         )}
         {screen === 'pack' && (
@@ -1282,7 +1315,8 @@ function HSKApp() {
         {screen === 'sentencebuilder' && (
           <SentenceBuilderScreen
             profile={profile}
-            onBack={() => setScreen('modes')}
+            onBack={() => { setModeConfig(null); setPendingMode(null); setScreen('home'); }}
+            modeConfig={modeConfig}
           />
         )}
         {screen === 'errorbook' && (
@@ -1607,7 +1641,7 @@ function ModeCard({ color, icon, name, sub, onClick }) {
 // ============================================================
 // SESSION SCREEN — gère flashcards et QCM
 // ============================================================
-function SessionScreen({ profile, learnerState, setLearnerState, onComplete, onQuit, mode = 'mixed' }) {
+function SessionScreen({ profile, learnerState, setLearnerState, onComplete, onQuit, mode = 'mixed', modeConfig = null }) {
   const [queue, setQueue] = useState([]);
   const [idx, setIdx] = useState(0);
   const [revealed, setRevealed] = useState(false);
@@ -1616,8 +1650,29 @@ function SessionScreen({ profile, learnerState, setLearnerState, onComplete, onQ
   const [startTime] = useState(Date.now());
   const [correctCount, setCorrectCount] = useState(0);
 
+  // Filtrer le vocab selon modeConfig (leçons sélectionnées)
+  const dataset = useMemo(() => {
+    if (!modeConfig || !modeConfig.lessonIds || modeConfig.lessonIds.length === 0) return HSK1_DATA;
+    const allLessons = getAllLessons();
+    const selectedLessons = allLessons.filter(l => modeConfig.lessonIds.includes(l.id));
+    const wordIds = new Set();
+    for (const l of selectedLessons) {
+      for (const wid of l.word_ids || []) wordIds.add(wid);
+      for (const pid of l.particle_ids || []) wordIds.add(pid);
+    }
+    return HSK1_DATA.filter(w => wordIds.has(w.id));
+  }, [modeConfig]);
+
+  // Adapter le profile.sessionSize selon questionCount du modeConfig
+  const effectiveProfile = useMemo(() => {
+    if (modeConfig && modeConfig.questionCount) {
+      return { ...profile, sessionSize: modeConfig.questionCount };
+    }
+    return profile;
+  }, [profile, modeConfig]);
+
   useEffect(() => {
-    const q = buildSessionQueue(learnerState, profile, HSK1_DATA);
+    const q = buildSessionQueue(learnerState, effectiveProfile, dataset);
     setQueue(q);
   }, []);
 
@@ -2760,7 +2815,7 @@ function OnboardingScreen({ initialProfile, onComplete }) {
 // ============================================================
 // SMART SENTENCE SCREEN — phrase générée par Claude avec QCM
 // ============================================================
-function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack }) {
+function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack, modeConfig = null }) {
   const isOnline = useOnlineStatus();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -2770,8 +2825,19 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
   const [stats, setStats] = useState({ done: 0, correct: 0 });
   const [currentTarget, setCurrentTarget] = useState(null);
 
-  // Récupérer le pool de mots du profil
-  const pool = HSK1_DATA;
+  // Récupérer le pool de mots filtré selon modeConfig
+  const pool = useMemo(() => {
+    if (!modeConfig || !modeConfig.lessonIds || modeConfig.lessonIds.length === 0) return HSK1_DATA;
+    const selectedLessons = getAllLessons().filter(l => modeConfig.lessonIds.includes(l.id));
+    const wordIds = new Set();
+    for (const l of selectedLessons) {
+      for (const wid of l.word_ids || []) wordIds.add(wid);
+      for (const pid of l.particle_ids || []) wordIds.add(pid);
+    }
+    return HSK1_DATA.filter(w => wordIds.has(w.id));
+  }, [modeConfig]);
+
+  const targetCount = modeConfig?.questionCount || 15;
 
   // Mots déjà rencontrés (utilisés comme contexte connu pour Claude)
   const knownWords = useMemo(() => {
@@ -2784,12 +2850,12 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
         });
       if (anyTouched) seen.add(item.hanzi);
     }
-    // Si peu de mots travaillés, prendre les premiers HSK1 pour avoir du contexte
+    // Si peu de mots travaillés, prendre les premiers du pool pour avoir du contexte
     if (seen.size < 10) {
       pool.slice(0, 20).forEach(w => seen.add(w.hanzi));
     }
     return Array.from(seen);
-  }, [learnerState, levels.join(',')]);
+  }, [learnerState, pool]);
 
   const [fromPack, setFromPack] = useState(false);
   const [packId, setPackId] = useState(null);
@@ -3016,7 +3082,7 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
 // ============================================================
 // READING SCREEN — texte généré + questions de compréhension
 // ============================================================
-function ReadingScreen({ profile, learnerState, onBack }) {
+function ReadingScreen({ profile, learnerState, onBack, modeConfig = null }) {
   const isOnline = useOnlineStatus();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -3024,7 +3090,18 @@ function ReadingScreen({ profile, learnerState, onBack }) {
   const [answers, setAnswers] = useState({}); // { qIdx: selectedIdx }
   const [revealed, setRevealed] = useState(false); // afficher la traduction française
   const [showPinyin, setShowPinyin] = useState(false);
-  const pool = HSK1_DATA;
+
+  // Pool filtré selon modeConfig
+  const pool = useMemo(() => {
+    if (!modeConfig || !modeConfig.lessonIds || modeConfig.lessonIds.length === 0) return HSK1_DATA;
+    const selectedLessons = getAllLessons().filter(l => modeConfig.lessonIds.includes(l.id));
+    const wordIds = new Set();
+    for (const l of selectedLessons) {
+      for (const wid of l.word_ids || []) wordIds.add(wid);
+      for (const pid of l.particle_ids || []) wordIds.add(pid);
+    }
+    return HSK1_DATA.filter(w => wordIds.has(w.id));
+  }, [modeConfig]);
 
   const knownWords = useMemo(() => {
     const seen = new Set();
@@ -3038,7 +3115,7 @@ function ReadingScreen({ profile, learnerState, onBack }) {
     }
     if (seen.size < 15) pool.slice(0, 30).forEach(w => seen.add(w.hanzi));
     return Array.from(seen);
-  }, [learnerState, levels.join(',')]);
+  }, [learnerState, pool]);
 
   const [fromPack, setFromPack] = useState(false);
   const [packId, setPackId] = useState(null);
@@ -3321,7 +3398,7 @@ const SENTENCE_BANK = [
   { fr: "Il fait de plus en plus froid.", tokens: ["天气", "越来越", "冷"], distractors: ["热", "很", "也"], hsk: 'hsk3' },
 ];
 
-function SentenceBuilderScreen({ profile, onBack }) {
+function SentenceBuilderScreen({ profile, onBack, modeConfig = null }) {
   const [currentIdx, setCurrentIdx] = useState(0);
   const [pool, setPool] = useState([]);
   const [available, setAvailable] = useState([]); // mots restant à tapper (avec distracteurs)
@@ -3329,12 +3406,57 @@ function SentenceBuilderScreen({ profile, onBack }) {
   const [feedback, setFeedback] = useState(null); // 'correct' | 'wrong' | null
   const [stats, setStats] = useState({ done: 0, correct: 0 });
 
-  // Toutes les phrases sont disponibles maintenant (plus de filtre HSK)
+  const targetCount = modeConfig?.questionCount || pool.length;
+
+  // Construit le pool de phrases selon modeConfig
+  // Utilise les phrases des leçons sélectionnées (banque + IA)
   useEffect(() => {
-    const filtered = SENTENCE_BANK;
-    const shuffled = [...filtered].sort(() => Math.random() - 0.5);
+    let phrases = [];
+
+    if (modeConfig && modeConfig.lessonIds && modeConfig.lessonIds.length > 0) {
+      // Récupérer phrases depuis les leçons choisies
+      const allLessons = getAllLessons();
+      const selectedLessons = allLessons.filter(l => modeConfig.lessonIds.includes(l.id));
+      const allP = [];
+      for (const l of selectedLessons) {
+        const banque = (l.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+        const ai = (l.extra_ai_phrases || []);
+        allP.push(...banque, ...ai);
+      }
+      // Convertir au format SentenceBuilder : { fr, tokens (pinyin), distractors }
+      phrases = allP
+        .filter(p => p.hanzi && p.pinyin && p.fr)
+        .map(p => {
+          // Tokens = syllabes pinyin de la phrase
+          const tokens = (p.pinyin || '').split(/\s+/).filter(Boolean);
+          if (tokens.length < 2 || tokens.length > 8) return null;
+          return {
+            fr: p.fr,
+            tokens,
+            distractors: [], // remplis plus bas
+            hanzi: p.hanzi,
+            pinyin: p.pinyin,
+          };
+        })
+        .filter(Boolean);
+
+      // Pour chaque phrase, ajouter 2-3 distracteurs depuis les autres phrases
+      const allTokens = phrases.flatMap(p => p.tokens);
+      const uniqueTokens = [...new Set(allTokens)];
+      phrases = phrases.map(p => {
+        const correctSet = new Set(p.tokens);
+        const candidates = uniqueTokens.filter(t => !correctSet.has(t));
+        const shuffled = candidates.sort(() => Math.random() - 0.5);
+        return { ...p, distractors: shuffled.slice(0, 2) };
+      });
+    } else {
+      // Fallback : SENTENCE_BANK historique
+      phrases = SENTENCE_BANK;
+    }
+
+    const shuffled = [...phrases].sort(() => Math.random() - 0.5);
     setPool(shuffled);
-  }, []);
+  }, [modeConfig]);
 
   const current = pool[currentIdx];
 
@@ -3427,16 +3549,18 @@ function SentenceBuilderScreen({ profile, onBack }) {
 
       <p style={{ fontSize: 11, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>CONSTRUCTION</p>
       <p style={{ fontSize: 18, margin: '0 0 16px', color: C.text }}>
-        <span className="hanzi" style={{ color: C.amber }}>组句</span> · reconstruis la phrase
+        <span className="hanzi" style={{ color: C.amber }}>组句</span> · reconstruis la phrase en pinyin
       </p>
 
       {/* Niveau de la phrase */}
-      <div style={{ textAlign: 'center', margin: '0 0 16px' }}>
-        <span style={{
-          fontSize: 9, padding: '4px 10px', border: `0.5px solid ${C.amber}`,
-          color: C.amber, borderRadius: 12, letterSpacing: 1.5,
-        }}>{current.hsk.toUpperCase()}</span>
-      </div>
+      {current.hsk && (
+        <div style={{ textAlign: 'center', margin: '0 0 16px' }}>
+          <span style={{
+            fontSize: 9, padding: '4px 10px', border: `0.5px solid ${C.amber}`,
+            color: C.amber, borderRadius: 12, letterSpacing: 1.5,
+          }}>{current.hsk.toUpperCase()}</span>
+        </div>
+      )}
 
       {/* Phrase française à traduire */}
       <div style={{
@@ -3468,13 +3592,13 @@ function SentenceBuilderScreen({ profile, onBack }) {
             key={t.key}
             onClick={() => handleBuiltTap(t)}
             disabled={!!feedback}
-            className="hanzi"
             style={{
               background: feedback === 'correct' ? 'rgba(45,212,191,0.15)' : feedback === 'wrong' ? 'rgba(239,68,68,0.15)' : C.bgElevated,
               border: `0.5px solid ${feedback === 'correct' ? C.teal : feedback === 'wrong' ? C.red : C.borderAccent}`,
-              color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 18,
+              color: C.text, padding: '6px 10px', borderRadius: 6, fontSize: 14,
+              fontFamily: 'monospace', letterSpacing: 0.5,
             }}
-          >{t.word}</button>
+          >{(/[\u4e00-\u9fa5]/.test(t.word)) ? '?' : t.word}</button>
         ))}
       </div>
 
@@ -3490,12 +3614,12 @@ function SentenceBuilderScreen({ profile, onBack }) {
               <button
                 key={t.key}
                 onClick={() => handleTokenTap(t)}
-                className="hanzi"
                 style={{
                   background: C.bgCard, border: `0.5px solid ${C.border}`,
-                  color: C.text, padding: '10px 14px', borderRadius: 6, fontSize: 18,
+                  color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 14,
+                  fontFamily: 'monospace', letterSpacing: 0.5,
                 }}
-              >{t.word}</button>
+              >{(/[\u4e00-\u9fa5]/.test(t.word)) ? '?' : t.word}</button>
             ))}
           </div>
         </>
@@ -3511,7 +3635,12 @@ function SentenceBuilderScreen({ profile, onBack }) {
           <p style={{ margin: 0, fontSize: 13, color: C.teal, fontWeight: 500 }}>
             ✓ Parfait !
           </p>
-          <p style={{ margin: '6px 0 0', fontSize: 12, color: C.textDim, fontStyle: 'italic' }}>
+          {current.hanzi && (
+            <p className="hanzi" style={{ margin: '6px 0 0', fontSize: 16, color: C.text }}>
+              {current.hanzi}
+            </p>
+          )}
+          <p style={{ margin: '4px 0 0', fontSize: 12, color: C.textDim, fontStyle: 'italic', fontFamily: 'monospace' }}>
             {current.tokens.join(' ')}
           </p>
         </div>
@@ -3527,7 +3656,15 @@ function SentenceBuilderScreen({ profile, onBack }) {
             ✗ Pas tout à fait
           </p>
           <p style={{ margin: 0, fontSize: 12, color: C.textDim }}>
-            <span style={{ color: C.text }}>Bonne réponse :</span> <span className="hanzi" style={{ fontSize: 14, color: C.text }}>{current.tokens.join(' ')}</span>
+            <span style={{ color: C.text }}>Bonne réponse :</span>
+          </p>
+          {current.hanzi && (
+            <p className="hanzi" style={{ margin: '4px 0 0', fontSize: 16, color: C.text }}>
+              {current.hanzi}
+            </p>
+          )}
+          <p style={{ margin: '2px 0 0', fontSize: 12, color: C.text, fontFamily: 'monospace' }}>
+            {current.tokens.join(' ')}
           </p>
         </div>
       )}
@@ -5609,8 +5746,13 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
   }
 
   // Cible : 80% des phrases réussies au moins 1 fois
-  const targetPhrases = Math.max(1, Math.ceil(phrases.length * 0.8));
-  const succeededCount = Object.values(phraseProgress).filter(v => v >= 1).length;
+  // Configuration selon l'intensité choisie pour la leçon
+  const intensity = getLessonIntensity(lessonId) || 'normal';
+  const phase3Config = useMemo(() => getPhase3Config(intensity), [intensity]);
+
+  const targetPhrases = Math.max(1, Math.ceil(phrases.length * phase3Config.targetPhrasesRatio));
+  // Une phrase est "réussie" si son compteur >= requiredPasses
+  const succeededCount = Object.values(phraseProgress).filter(v => v >= phase3Config.requiredPasses).length;
   const phaseDone = succeededCount >= targetPhrases;
 
   // Tokeniser une phrase en "mots" présents dans le vocab (par greedy match)
@@ -5714,8 +5856,8 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       return;
     }
 
-    // Choisir une phrase pas encore réussie en priorité
-    const notSucceeded = phrases.filter(p => !phraseProgress[p.id] || phraseProgress[p.id] < 1);
+    // Choisir une phrase pas encore validée en priorité (selon requiredPasses)
+    const notSucceeded = phrases.filter(p => (phraseProgress[p.id] || 0) < phase3Config.requiredPasses);
     const phrase = notSucceeded.length > 0
       ? notSucceeded[Math.floor(Math.random() * notSucceeded.length)]
       : phrases[Math.floor(Math.random() * phrases.length)];
@@ -7118,6 +7260,184 @@ function LessonParticulesScreen({ lessonId, onBack, onComplete }) {
       }}>
         J'AI COMPRIS, PASSER À LA PHASE 2 →
       </button>
+    </div>
+  );
+}
+
+
+// ============================================================
+// MODE CONFIG SCREEN — configuration avant un mode libre
+// L'utilisateur choisit :
+//   - Quelles leçons utiliser (toutes / sélection multiple / une seule)
+//   - Le nombre de questions
+// ============================================================
+function ModeConfigScreen({ modeKey, modeLabel, onCancel, onStart }) {
+  const allLessons = useMemo(() => getAllLessons(), []);
+  const [selectedIds, setSelectedIds] = useState([]); // [] = aucune (état initial)
+  const [allMode, setAllMode] = useState(true); // true par défaut = toutes les leçons
+  const [questionCount, setQuestionCount] = useState(15);
+
+  const toggleLesson = (id) => {
+    setAllMode(false);
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const selectAll = () => {
+    setAllMode(true);
+    setSelectedIds([]);
+  };
+
+  const handleStart = () => {
+    const lessonIds = allMode
+      ? allLessons.map(l => l.id)
+      : selectedIds;
+    if (lessonIds.length === 0) return;
+    onStart({ lessonIds, questionCount });
+  };
+
+  // Compter les mots/phrases couverts par la sélection
+  const stats = useMemo(() => {
+    const ids = allMode ? allLessons.map(l => l.id) : selectedIds;
+    const lessonsSelected = allLessons.filter(l => ids.includes(l.id));
+    const allWordIds = new Set();
+    let phraseCount = 0;
+    for (const l of lessonsSelected) {
+      for (const wid of l.word_ids || []) allWordIds.add(wid);
+      phraseCount += (l.phrase_ids || []).length + (l.extra_ai_phrases || []).length;
+    }
+    return { wordCount: allWordIds.size, phraseCount, lessonCount: lessonsSelected.length };
+  }, [allMode, selectedIds, allLessons]);
+
+  const canStart = (allMode || selectedIds.length > 0) && stats.wordCount > 0;
+
+  // Grouper leçons par chapitre
+  const lessonsByChapter = useMemo(() => {
+    const map = {};
+    for (const l of allLessons) {
+      if (!map[l.chapter]) map[l.chapter] = [];
+      map[l.chapter].push(l);
+    }
+    return map;
+  }, [allLessons]);
+
+  return (
+    <div className="slide-up">
+      <button onClick={onCancel} style={{
+        background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+      }}>← retour</button>
+
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+        CONFIGURER
+      </p>
+      <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 6px', color: C.text }}>
+        {modeLabel}
+      </p>
+      <p style={{ fontSize: 12, color: C.textDim, margin: '0 0 20px', lineHeight: 1.5 }}>
+        Choisis sur quelles leçons travailler et la durée de la session.
+      </p>
+
+      {/* Sélection leçons */}
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 8px' }}>
+        LEÇONS
+      </p>
+
+      <button onClick={selectAll} style={{
+        width: '100%',
+        background: allMode ? `rgba(45,212,191,0.10)` : C.bgCard,
+        border: `0.5px solid ${allMode ? C.teal : C.border}`,
+        borderLeft: `3px solid ${allMode ? C.teal : C.border}`,
+        color: C.text, padding: 12, borderRadius: 0,
+        textAlign: 'left', marginBottom: 8,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <div>
+          <p style={{ margin: '0 0 2px', fontSize: 13, fontWeight: 500 }}>
+            ✦ Toutes les leçons
+          </p>
+          <p style={{ margin: 0, fontSize: 10, color: C.textDim }}>
+            {allLessons.length} leçons · vocabulaire complet
+          </p>
+        </div>
+        <span style={{ color: allMode ? C.teal : C.textFaint, fontSize: 16 }}>
+          {allMode ? '●' : '○'}
+        </span>
+      </button>
+
+      <p style={{ fontSize: 10, color: C.textDim, margin: '12px 0 8px', textAlign: 'center', letterSpacing: 1 }}>
+        OU SÉLECTIONNE MANUELLEMENT
+      </p>
+
+      <div style={{ marginBottom: 16 }}>
+        {Object.entries(lessonsByChapter).map(([chapter, lessons]) => (
+          <div key={chapter} style={{ marginBottom: 12 }}>
+            <p style={{ fontSize: 9, color: C.textDim, letterSpacing: 2, margin: '0 0 4px' }}>
+              {chapter.toUpperCase()}
+            </p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+              {lessons.map(l => {
+                const active = !allMode && selectedIds.includes(l.id);
+                return (
+                  <button key={l.id} onClick={() => toggleLesson(l.id)} style={{
+                    background: active ? `rgba(168,85,247,0.10)` : C.bgCard,
+                    border: `0.5px solid ${active ? C.purple : C.border}`,
+                    color: active ? C.purple : C.text,
+                    padding: '5px 8px', borderRadius: 0, fontSize: 10,
+                    fontWeight: active ? 600 : 400,
+                  }}>
+                    {l.id}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Nombre de questions */}
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 1, margin: '0 0 8px' }}>
+        NOMBRE DE QUESTIONS
+      </p>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
+        {[10, 15, 20, 30, 50].map(n => {
+          const active = questionCount === n;
+          return (
+            <button key={n}
+              onClick={() => setQuestionCount(n)}
+              style={{
+                flex: 1,
+                background: active ? C.teal : C.bgCard,
+                border: `0.5px solid ${active ? C.teal : C.border}`,
+                color: active ? C.bg : C.text,
+                padding: '10px 4px', borderRadius: 0,
+                fontSize: 13, fontWeight: active ? 600 : 400,
+              }}>{n}</button>
+          );
+        })}
+      </div>
+
+      {/* Récap */}
+      <div style={{
+        background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
+        border: `0.5px solid ${C.borderAccent}`,
+        borderRadius: 8, padding: 12, marginBottom: 16,
+      }}>
+        <p style={{ fontSize: 11, color: C.teal, letterSpacing: 1, margin: '0 0 4px' }}>
+          ✓ TON CHOIX
+        </p>
+        <p style={{ fontSize: 12, color: C.text, margin: 0, lineHeight: 1.5 }}>
+          {stats.lessonCount} leçon{stats.lessonCount > 1 ? 's' : ''} · {stats.wordCount} mots · {stats.phraseCount} phrases · {questionCount} questions
+        </p>
+      </div>
+
+      <button onClick={handleStart} disabled={!canStart} style={{
+        width: '100%',
+        background: canStart ? C.teal : C.border,
+        color: canStart ? C.bg : C.textDim,
+        border: 'none', padding: 14, borderRadius: 8,
+        fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+      }}>C'EST PARTI →</button>
     </div>
   );
 }
