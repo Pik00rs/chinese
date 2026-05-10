@@ -1320,6 +1320,22 @@ function HSKApp() {
             onBack={() => setScreen('lessondetail')}
             onPhaseComplete={() => {
               completeLessonPhase(selectedLessonId, 1);
+              const lesson = getLessonById(selectedLessonId);
+              const hasParticles = lesson?.particle_ids && lesson.particle_ids.length > 0;
+              if (hasParticles) {
+                setScreen('lessonparticules');
+              } else {
+                updateLessonPhase(selectedLessonId, 2);
+                setScreen('lessonphase2');
+              }
+            }}
+          />
+        )}
+        {screen === 'lessonparticules' && selectedLessonId && (
+          <LessonParticulesScreen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onComplete={() => {
               updateLessonPhase(selectedLessonId, 2);
               setScreen('lessonphase2');
             }}
@@ -4493,7 +4509,10 @@ function LessonDetailScreen({ lessonId, onBack, onStart, onChangeIntensity }) {
   }
 
   const words = lesson.word_ids.map(id => getWordById(id)).filter(Boolean);
-  const phrases = (lesson.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+  const banquePhrases = (lesson.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+  const aiPhrases = lesson.extra_ai_phrases || [];
+  const phrases = [...banquePhrases, ...aiPhrases];
+  const particles = (lesson.particle_ids || []).map(id => getWordById(id)).filter(Boolean);
   const progress = loadLessonProgress()[lesson.id];
   const wordQuality = loadWordQuality();
   const avgQuality = getAverageQuality(lesson.word_ids, wordQuality);
@@ -4637,7 +4656,7 @@ function LessonDetailScreen({ lessonId, onBack, onStart, onChangeIntensity }) {
       {phrases.length > 0 && (
         <>
           <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 10px' }}>
-            PHRASES ASSOCIÉES ({phrases.length})
+            PHRASES ASSOCIÉES ({phrases.length}{aiPhrases.length > 0 ? ` · ${banquePhrases.length} banque + ${aiPhrases.length} IA` : ''})
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 24 }}>
             {phrases.slice(0, 5).map(p => (
@@ -4655,6 +4674,36 @@ function LessonDetailScreen({ lessonId, onBack, onStart, onChangeIntensity }) {
                 + {phrases.length - 5} autres
               </p>
             )}
+          </div>
+        </>
+      )}
+
+      {particles.length > 0 && (
+        <>
+          <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 10px' }}>
+            ✦ PARTICULES À DÉCOUVRIR ({particles.length})
+          </p>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(168,85,247,0.05), rgba(244,114,182,0.03))',
+            border: `0.5px solid ${C.purple}`, borderRadius: 8, padding: 12, marginBottom: 24,
+          }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 6 }}>
+              {particles.map(p => (
+                <span key={p.id} style={{
+                  background: C.bg,
+                  border: `0.5px solid ${C.purple}`,
+                  padding: '4px 10px', borderRadius: 4, fontSize: 14,
+                }}>
+                  <span className="hanzi" style={{ color: C.purple }}>{p.hanzi}</span>
+                  <span style={{ fontSize: 10, color: C.textDim, marginLeft: 6, fontFamily: 'monospace' }}>
+                    {p.pinyin}
+                  </span>
+                </span>
+              ))}
+            </div>
+            <p style={{ fontSize: 10, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+              Tu les découvriras entre les Phases 1 et 2.
+            </p>
           </div>
         </>
       )}
@@ -5168,10 +5217,15 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
 function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
   const lesson = getLessonById(lessonId);
   const words = useMemo(() => (lesson?.word_ids || []).map(id => getWordById(id)).filter(Boolean), [lessonId]);
-  const allLessonPhrases = useMemo(
-    () => (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean),
-    [lessonId]
-  );
+  const allLessonPhrases = useMemo(() => {
+    // Combiner phrases banque + phrases générées par IA
+    const banque = (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+    const ai = (lesson?.extra_ai_phrases || []).map((p, idx) => ({
+      ...p,
+      id: `ai_${lesson.id}_${idx}`, // id stable distinct des phrases banque
+    }));
+    return [...banque, ...ai];
+  }, [lessonId]);
 
   // Phrases utilisables : toutes les phrases de la leçon (le mapping est strict, donc déjà filtré)
   // On préfère les courtes/moyennes pour la phase 2
@@ -5435,10 +5489,14 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
 // ============================================================
 function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
   const lesson = getLessonById(lessonId);
-  const phrases = useMemo(
-    () => (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean),
-    [lessonId]
-  );
+  const phrases = useMemo(() => {
+    const banque = (lesson?.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+    const ai = (lesson?.extra_ai_phrases || []).map((p, idx) => ({
+      ...p,
+      id: `ai_${lesson.id}_${idx}`,
+    }));
+    return [...banque, ...ai];
+  }, [lessonId]);
 
   // Persistance des phrases déjà réussies dans la phase 3 de cette leçon
   const phraseProgressKey = `hsk_phase3_${lessonId}`;
@@ -6859,6 +6917,130 @@ function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
       <p style={{ fontSize: 10, color: C.textFaint, textAlign: 'center', margin: '0 0 8px', lineHeight: 1.5 }}>
         Tu peux changer l'intensité à tout moment depuis l'écran de la leçon.
       </p>
+    </div>
+  );
+}
+
+
+// ============================================================
+// LESSON PARTICULES — mini-module dédié aux particules de la leçon
+// Affiche chaque particule avec son rôle + 2 exemples concrets
+// Pas de "validation" rigoureuse, juste un passage pédagogique
+// ============================================================
+function LessonParticulesScreen({ lessonId, onBack, onComplete }) {
+  const lesson = getLessonById(lessonId);
+  if (!lesson) return null;
+
+  const particleIds = lesson.particle_ids || [];
+  const particles = particleIds.map(id => getWordById(id)).filter(Boolean);
+
+  // Phrases de la leçon qui contiennent chaque particule (pour exemples)
+  const allLessonPhrases = (lesson.phrase_ids || []).map(id => getPhraseById(id)).filter(Boolean);
+  const examplesByParticle = useMemo(() => {
+    const map = {};
+    for (const p of particles) {
+      // Trouver 2 phrases qui contiennent ce char
+      const exs = allLessonPhrases.filter(ph => ph.hanzi.includes(p.hanzi)).slice(0, 2);
+      map[p.id] = exs;
+    }
+    return map;
+  }, [particles, allLessonPhrases]);
+
+  // S'il n'y a pas de particules dans cette leçon, on skip directement
+  useEffect(() => {
+    if (particles.length === 0) onComplete();
+  }, [particles.length]);
+
+  if (particles.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="slide-up">
+      <button onClick={onBack} style={{
+        background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+      }}>← retour</button>
+
+      <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 6px' }}>
+        ✦ MODULE PARTICULES
+      </p>
+      <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+        {particles.length} particule{particles.length > 1 ? 's' : ''} dans cette leçon
+      </p>
+      <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+        Les particules sont des petits mots grammaticaux qui n'ont pas vraiment de
+        traduction directe. Lis-les avec leurs exemples avant d'attaquer les phrases.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 }}>
+        {particles.map(p => {
+          const examples = examplesByParticle[p.id] || [];
+          return (
+            <div key={p.id} style={{
+              background: C.bgCard,
+              border: `0.5px solid ${C.border}`,
+              borderLeft: `3px solid ${C.purple}`,
+              padding: 14, borderRadius: 8,
+            }}>
+              {/* En-tête : hanzi + pinyin */}
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 8 }}>
+                <span className="hanzi" style={{ fontSize: 28, color: C.purple, fontWeight: 500 }}>
+                  {p.hanzi}
+                </span>
+                <span style={{ fontSize: 13, color: C.textDim, fontFamily: 'monospace' }}>
+                  {displayPinyin(p.pinyin)}
+                </span>
+                {isTTSAvailable() && (
+                  <button onClick={() => speak(p.hanzi)} style={{
+                    marginLeft: 'auto',
+                    background: 'transparent', border: `0.5px solid ${C.teal}`,
+                    color: C.teal, padding: '3px 8px', borderRadius: 4, fontSize: 10, letterSpacing: 1,
+                  }}>♪</button>
+                )}
+              </div>
+
+              {/* Description / rôle */}
+              <p style={{ fontSize: 12, color: C.text, margin: '0 0 10px', lineHeight: 1.5 }}>
+                {p.fr}
+              </p>
+
+              {/* Exemples */}
+              {examples.length > 0 && (
+                <div style={{
+                  background: C.bg,
+                  border: `0.5px solid ${C.border}`,
+                  padding: 10, borderRadius: 6,
+                }}>
+                  <p style={{ fontSize: 9, color: C.textDim, letterSpacing: 1.5, margin: '0 0 6px' }}>
+                    EXEMPLES DANS LA LEÇON
+                  </p>
+                  {examples.map((ex, i) => (
+                    <div key={ex.id} style={{ marginBottom: i < examples.length - 1 ? 8 : 0 }}>
+                      <p className="hanzi" style={{ fontSize: 14, margin: '0 0 2px', color: C.text }}>
+                        {ex.hanzi}
+                      </p>
+                      <p style={{ fontSize: 10, color: C.textDim, margin: '0 0 1px', fontFamily: 'monospace' }}>
+                        {displayPinyin(ex.pinyin)}
+                      </p>
+                      <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+                        {ex.fr}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <button onClick={onComplete} style={{
+        width: '100%',
+        background: C.purple, color: C.bg, border: 'none',
+        padding: 14, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+      }}>
+        J'AI COMPRIS, PASSER À LA PHASE 2 →
+      </button>
     </div>
   );
 }
