@@ -277,18 +277,23 @@ function normalizePinyin(s) {
     .replace(/[，。？！,.?!;]/g, '');
 }
 
-// Vérifie si l'input correspond au pinyin attendu, avec tolérance d'1 lettre de typo
-// Pour les phrases longues (>10 chars), on tolère jusqu'à 2 lettres
+// Vérifie si l'input correspond au pinyin attendu
+// Retourne :
+//   { result: 'exact' } : parfait
+//   { result: 'close', distance: N } : très proche (1-2 lettres de typo) — on demande à l'utilisateur
+//   { result: 'wrong', distance: N } : faux
 function pinyinMatches(userInput, expected) {
   const u = normalizePinyin(userInput);
   const e = normalizePinyin(expected);
-  if (u === e) return { match: true, exact: true };
-  if (!u || !e) return { match: false };
-  // Tolérance : 1 lettre de typo si phrase courte, 2 si longue
-  const maxDist = e.length > 10 ? 2 : 1;
+  if (u === e) return { result: 'exact', match: true, exact: true };
+  if (!u || !e) return { result: 'wrong', match: false };
+  // Seuil "close" : 1-2 lettres de différence (selon longueur)
+  const closeThreshold = e.length > 10 ? 2 : 1;
   const dist = levenshtein(u, e);
-  if (dist <= maxDist) return { match: true, exact: false, distance: dist };
-  return { match: false, distance: dist };
+  if (dist <= closeThreshold) {
+    return { result: 'close', match: false, exact: false, distance: dist };
+  }
+  return { result: 'wrong', match: false, distance: dist };
 }
 
 function speak(text, lang = 'zh-CN', rate = 0.85) {
@@ -692,6 +697,24 @@ function getActiveModalities(intensity) {
   if (intensity === 'light') return ['qcm_zh_fr', 'fill_manual'];
   if (intensity === 'deep') return ['qcm_zh_fr', 'qcm_fr_zh', 'fill_manual', 'audio'];
   return ['qcm_zh_fr', 'qcm_fr_zh', 'fill_manual']; // 'normal' par défaut
+}
+
+// Configuration Phase 2 (phrases QCM) selon l'intensité
+function getPhase2Config(intensity) {
+  // requiredPasses : combien de fois chaque phrase doit être réussie pour être validée
+  // useBothDirections : oui = on alterne phrase→fr et fr→phrase, non = un seul type
+  if (intensity === 'light') return { requiredPasses: 1, useBothDirections: false };
+  if (intensity === 'deep') return { requiredPasses: 2, useBothDirections: true };
+  return { requiredPasses: 1, useBothDirections: true }; // normal
+}
+
+// Configuration Phase 3 (phrases tap/fill) selon l'intensité
+function getPhase3Config(intensity) {
+  // targetPhrasesRatio : fraction des phrases à réussir pour terminer (1.0 = toutes)
+  // requiredPasses : nombre de réussites par phrase
+  if (intensity === 'light') return { targetPhrasesRatio: 0.6, requiredPasses: 1 };
+  if (intensity === 'deep') return { targetPhrasesRatio: 1.0, requiredPasses: 2 };
+  return { targetPhrasesRatio: 1.0, requiredPasses: 1 }; // normal
 }
 
 // Mettre à jour la phase d'une leçon
@@ -1759,7 +1782,7 @@ function CardContent({ item, facet, revealed, setRevealed, selectedAnswer, setSe
             return (
               <button key={opt.id} onClick={() => handleSelect(opt)} disabled={!!selectedAnswer} style={{
                 background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                padding: 13, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 14,
               }}>{opt.fr}</button>
             );
           })}
@@ -1835,7 +1858,7 @@ function CardContent({ item, facet, revealed, setRevealed, selectedAnswer, setSe
             return (
               <button key={opt.id} onClick={() => handleSelect(opt)} disabled={!!selectedAnswer} style={{
                 background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                padding: 13, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 14,
               }}>{opt.fr}</button>
             );
           })}
@@ -2352,7 +2375,7 @@ function ProfileScreen({ profile, setProfile, onBack, onOpenPack }) {
             try {
               const allKeys = Object.keys(localStorage);
               for (const k of allKeys) {
-                if (k.startsWith('hsk_phase3_') || k.startsWith('hsk_phase5_')) {
+                if (k.startsWith('hsk_phase2_') || k.startsWith('hsk_phase3_') || k.startsWith('hsk_phase5_')) {
                   localStorage.removeItem(k);
                 }
               }
@@ -2920,7 +2943,7 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', margin: '8px 0 16px', textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', margin: '8px 0 16px', textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 28, margin: '0 0 12px', color: C.text, fontWeight: 400, lineHeight: 1.4 }}>
               {exercise.sentence_zh}
@@ -2936,11 +2959,11 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
             )}
           </div>
 
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quelle est la traduction ?
           </p>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {(exercise.options_fr || []).map((opt, i) => {
               let borderColor = C.border, bg = C.bgCard;
               if (selectedAnswer !== null) {
@@ -2950,7 +2973,7 @@ function SmartSentenceScreen({ profile, learnerState, setLearnerState, onBack })
               return (
                 <button key={i} onClick={() => handleSelect(i)} disabled={selectedAnswer !== null} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 13, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 14,
                 }}>{opt}</button>
               );
             })}
@@ -3123,7 +3146,7 @@ function ReadingScreen({ profile, learnerState, onBack }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(244,114,182,0.06), rgba(168,85,247,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', margin: '0 0 14px',
+            borderRadius: 12, padding: '14px 14px', margin: '0 0 14px',
           }}>
             <p className="hanzi" style={{ fontSize: 22, margin: '0 0 14px', color: C.text, fontWeight: 400, lineHeight: 1.6 }}>
               {content.text_zh}
@@ -4857,11 +4880,16 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
   const handleFillSubmit = () => {
     if (submitted) return;
     setSubmitted(true);
-    const correct = pinyinMatches(userInput, word.pinyin).match;
-    setFeedback(correct ? 'correct' : 'wrong');
-    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
-    updateWordQuality(word.id, modality, correct);
-    if (!correct) {
+    const matchResult = pinyinMatches(userInput, word.pinyin);
+    const correct = matchResult.result === 'exact';
+    setFeedback(matchResult.result === 'exact' ? 'correct' : matchResult.result === 'close' ? 'close' : 'wrong');
+    if (correct) {
+      setStats(s => ({ done: s.done + 1, correct: s.correct + 1 }));
+      updateWordQuality(word.id, modality, true);
+    } else if (matchResult.result === 'wrong') {
+      // Erreur franche : on incrémente pas done (on attend la décision sur close), et on log
+      setStats(s => ({ done: s.done + 1, correct: s.correct }));
+      updateWordQuality(word.id, modality, false);
       logError({
         item_id: word.id, hanzi: word.hanzi, pinyin: word.pinyin, fr: word.fr,
         facet: 'fill_manual', mode: 'lesson_phase1',
@@ -4869,7 +4897,28 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
         user_answer: userInput, correct_answer: word.pinyin,
       });
     }
+    // Si 'close' : on attend que l'utilisateur clique sur "C'était une faute de frappe" ou "Je ne savais pas"
     markActivity(1);
+  };
+
+  // Validation manuelle : "C'était une faute de frappe"
+  const handleAcceptTypo = () => {
+    setFeedback('correct');
+    setStats(s => ({ done: s.done + 1, correct: s.correct + 1 }));
+    updateWordQuality(word.id, modality, true);
+  };
+
+  // Validation manuelle : "Je ne savais pas"
+  const handleRejectTypo = () => {
+    setFeedback('wrong');
+    setStats(s => ({ done: s.done + 1, correct: s.correct }));
+    updateWordQuality(word.id, modality, false);
+    logError({
+      item_id: word.id, hanzi: word.hanzi, pinyin: word.pinyin, fr: word.fr,
+      facet: 'fill_manual', mode: 'lesson_phase1',
+      error_type: 'typo_rejected',
+      user_answer: userInput, correct_answer: word.pinyin,
+    });
   };
 
   // Handler audio : on entend, on tape pinyin OU sens FR
@@ -4878,8 +4927,11 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     setSubmitted(true);
     const audioMode = currentExo.audioMode; // 'pinyin' | 'fr'
     let correct = false;
+    let isClose = false;
     if (audioMode === 'pinyin') {
-      correct = pinyinMatches(userInput, word.pinyin).match;
+      const matchResult = pinyinMatches(userInput, word.pinyin);
+      correct = matchResult.result === 'exact';
+      isClose = matchResult.result === 'close';
     } else {
       // Pour le sens : on accepte si la réponse contient le sens principal (insensible à la casse)
       const userClean = userInput.toLowerCase().trim();
@@ -4889,10 +4941,14 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       correct = variants.some(v => v === userClean) ||
                 userClean.length >= 3 && variants.some(v => v.includes(userClean) || userClean.includes(v));
     }
-    setFeedback(correct ? 'correct' : 'wrong');
-    setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
-    updateWordQuality(word.id, 'audio', correct);
-    if (!correct) {
+    setFeedback(correct ? 'correct' : isClose ? 'close' : 'wrong');
+    if (correct) {
+      setStats(s => ({ done: s.done + 1, correct: s.correct + 1 }));
+      updateWordQuality(word.id, 'audio', true);
+    } else if (!isClose) {
+      // Erreur franche
+      setStats(s => ({ done: s.done + 1, correct: s.correct }));
+      updateWordQuality(word.id, 'audio', false);
       logError({
         item_id: word.id, hanzi: word.hanzi, pinyin: word.pinyin, fr: word.fr,
         facet: 'audio', mode: 'lesson_phase1',
@@ -4901,6 +4957,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
         correct_answer: audioMode === 'pinyin' ? word.pinyin : word.fr,
       });
     }
+    // Si 'close' : on laisse l'utilisateur décider via les boutons typo
     markActivity(1);
   };
 
@@ -4945,7 +5002,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.08), rgba(168,85,247,0.06))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '32px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '18px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 56, margin: 0, color: C.text, fontWeight: 300 }}>
               {word.hanzi}
@@ -4960,10 +5017,10 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
               }}>♪ ÉCOUTER</button>
             )}
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quel est le sens ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -4973,7 +5030,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 13, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 14,
                 }}>{opt.fr}</button>
               );
             })}
@@ -4987,16 +5044,16 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(244,114,182,0.06), rgba(168,85,247,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 22, margin: 0, color: C.text, fontWeight: 400 }}>
               {word.fr}
             </p>
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quel hanzi correspond ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -5005,7 +5062,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 13, borderRadius: 8, textAlign: 'left', fontSize: 16,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 16,
                   display: 'flex', alignItems: 'center', gap: 10,
                 }}>
                   <span className="hanzi" style={{ fontSize: 20 }}>{opt.hanzi}</span>
@@ -5023,9 +5080,9 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(251,191,36,0.06), rgba(244,114,182,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '32px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '18px 14px', marginBottom: 10, textAlign: 'center',
           }}>
-            <p className="hanzi" style={{ fontSize: 48, margin: '0 0 8px', color: C.text, fontWeight: 300 }}>
+            <p className="hanzi" style={{ fontSize: 36, margin: '0 0 6px', color: C.text, fontWeight: 300 }}>
               {word.hanzi}
             </p>
             <p style={{ fontSize: 13, color: C.textDim, margin: 0 }}>
@@ -5067,7 +5124,7 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(168,85,247,0.08), rgba(45,212,191,0.05))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '32px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '18px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 12px' }}>
               ÉCOUTE
@@ -5123,24 +5180,62 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       {/* Feedback global */}
       {submitted && (
         <>
-          <div style={{
-            padding: 12, borderRadius: 8, marginBottom: 12,
-            background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
-            border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
-          }}>
-            <p style={{ margin: '0 0 4px', fontSize: 13, color: feedback === 'correct' ? C.teal : C.red, fontWeight: 500 }}>
-              {feedback === 'correct' ? '✓ Correct' : '✗ Incorrect'}
-            </p>
-            <p style={{ margin: 0, fontSize: 12, color: C.textDim }}>
-              <span className="hanzi" style={{ fontSize: 14, color: C.text }}>{word.hanzi}</span>
-              <span style={{ marginLeft: 8 }}>{word.pinyin}</span>
-              <span style={{ marginLeft: 8, color: C.textFaint }}>· {word.fr}</span>
-            </p>
-          </div>
-          <button onClick={handleNext} style={{
-            width: '100%', background: C.teal, color: C.bg, border: 'none',
-            padding: 13, borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
-          }}>SUIVANT →</button>
+          {feedback === 'close' ? (
+            // Cas "presque correct" : on demande à l'utilisateur
+            <>
+              <div style={{
+                padding: 10, borderRadius: 6, marginBottom: 8,
+                background: 'rgba(251,191,36,0.08)',
+                border: `0.5px solid ${C.amber}`,
+              }}>
+                <p style={{ margin: '0 0 4px', fontSize: 13, color: C.amber, fontWeight: 500 }}>
+                  ⚠ Presque, mais pas tout à fait
+                </p>
+                <p style={{ margin: '0 0 4px', fontSize: 11, color: C.textDim }}>
+                  Tu as tapé : <span style={{ color: C.text, fontFamily: 'monospace' }}>{userInput}</span>
+                </p>
+                <p style={{ margin: 0, fontSize: 12, color: C.textDim }}>
+                  Bonne réponse : <span className="hanzi" style={{ fontSize: 14, color: C.text }}>{word.hanzi}</span>
+                  <span style={{ marginLeft: 6, color: C.text, fontFamily: 'monospace' }}>{word.pinyin}</span>
+                  <span style={{ marginLeft: 6, color: C.textFaint }}>· {word.fr}</span>
+                </p>
+              </div>
+              <p style={{ margin: '0 0 8px', fontSize: 11, color: C.textDim, textAlign: 'center' }}>
+                C'était une faute de frappe ?
+              </p>
+              <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                <button onClick={() => { handleAcceptTypo(); setTimeout(handleNext, 300); }} style={{
+                  flex: 1, background: C.teal, color: C.bg, border: 'none',
+                  padding: 11, borderRadius: 6, fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
+                }}>✓ OUI, JE SAVAIS</button>
+                <button onClick={() => { handleRejectTypo(); setTimeout(handleNext, 300); }} style={{
+                  flex: 1, background: 'transparent', color: C.red, border: `0.5px solid ${C.red}`,
+                  padding: 11, borderRadius: 6, fontSize: 12, fontWeight: 600, letterSpacing: 0.5,
+                }}>✗ NON, JE NE SAVAIS PAS</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{
+                padding: 10, borderRadius: 6, marginBottom: 8,
+                background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
+                border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
+              }}>
+                <p style={{ margin: '0 0 4px', fontSize: 13, color: feedback === 'correct' ? C.teal : C.red, fontWeight: 500 }}>
+                  {feedback === 'correct' ? '✓ Correct' : '✗ Incorrect'}
+                </p>
+                <p style={{ margin: 0, fontSize: 12, color: C.textDim }}>
+                  <span className="hanzi" style={{ fontSize: 14, color: C.text }}>{word.hanzi}</span>
+                  <span style={{ marginLeft: 8 }}>{word.pinyin}</span>
+                  <span style={{ marginLeft: 8, color: C.textFaint }}>· {word.fr}</span>
+                </p>
+              </div>
+              <button onClick={handleNext} style={{
+                width: '100%', background: C.teal, color: C.bg, border: 'none',
+                padding: 11, borderRadius: 6, fontWeight: 600, fontSize: 13, letterSpacing: 0.5,
+              }}>SUIVANT →</button>
+            </>
+          )}
         </>
       )}
     </div>
@@ -5165,29 +5260,62 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
     return [...banque, ...ai];
   }, [lessonId]);
 
-  // Phrases utilisables : toutes les phrases de la leçon (le mapping est strict, donc déjà filtré)
-  // On préfère les courtes/moyennes pour la phase 2
+  // Phrases utilisables : on garde les courtes/moyennes pour Phase 2
   const usablePhrases = useMemo(() => {
     return allLessonPhrases.filter(p => p.hanzi.length <= 14);
   }, [allLessonPhrases]);
+
+  // Configuration selon l'intensité choisie pour la leçon
+  const intensity = getLessonIntensity(lessonId) || 'normal';
+  const config = useMemo(() => getPhase2Config(intensity), [intensity]);
+
+  // État local : pour chaque phrase, on stocke combien de fois elle a été réussie
+  // Format : { 'phrase_id': { phrase_to_fr: 1, fr_to_phrase: 0 } }
+  // Persisté en localStorage par leçon pour ne pas perdre la progression entre sessions
+  const phraseProgressKey = `hsk_phase2_${lessonId}`;
+  const [phraseProgress, setPhraseProgress] = useState(() => {
+    try {
+      const saved = localStorage.getItem(phraseProgressKey);
+      return saved ? JSON.parse(saved) : {};
+    } catch { return {}; }
+  });
+
+  const persistProgress = (next) => {
+    setPhraseProgress(next);
+    try { localStorage.setItem(phraseProgressKey, JSON.stringify(next)); } catch {}
+  };
 
   const [currentExo, setCurrentExo] = useState(null);
   const [submitted, setSubmitted] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [stats, setStats] = useState({ done: 0, correct: 0 });
-  const [refreshKey, setRefreshKey] = useState(0);
 
   // Anti-répétition
   const recentPhrasesRef = useRef([]);
 
-  const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
+  // Une phrase est "validée" si elle a été réussie suffisamment de fois
+  // selon la configuration de l'intensité
+  const isPhraseDone = (phraseId) => {
+    const prog = phraseProgress[phraseId] || {};
+    if (config.useBothDirections) {
+      // Doit être réussie sur les 2 directions, requiredPasses fois chacune
+      return (prog.phrase_to_fr || 0) >= config.requiredPasses
+          && (prog.fr_to_phrase || 0) >= config.requiredPasses;
+    }
+    // Une seule direction suffit
+    const total = (prog.phrase_to_fr || 0) + (prog.fr_to_phrase || 0);
+    return total >= config.requiredPasses;
+  };
 
-  // Mots qui n'ont PAS encore validé in_phrase → à travailler
-  const wordsToWork = useMemo(() => {
-    return words.filter(w => !(wordQuality[w.id]?.in_phrase));
-  }, [words, wordQuality]);
+  // Phrases encore à travailler
+  const phrasesToWork = useMemo(() => {
+    return usablePhrases.filter(p => !isPhraseDone(p.id));
+  }, [usablePhrases, phraseProgress, config]);
 
-  const phaseDone = wordsToWork.length === 0 || usablePhrases.length === 0;
+  // Compteur global pour la barre de progression
+  const totalPhrases = usablePhrases.length;
+  const validatedCount = totalPhrases - phrasesToWork.length;
+  const phaseDone = phrasesToWork.length === 0 || usablePhrases.length === 0;
 
   const pickNext = () => {
     setSubmitted(false);
@@ -5197,16 +5325,10 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
       return;
     }
 
-    // Choisir une phrase qui contient au moins un mot pas encore validé in_phrase
-    const wordsToWorkIds = new Set(wordsToWork.map(w => w.id));
-    const candidatesPhrases = usablePhrases.filter(p =>
-      p.words.some(wid => wordsToWorkIds.has(wid))
-    );
-
     // Filter récentes
     const recentIds = new Set(recentPhrasesRef.current.slice(-3));
-    const fresh = candidatesPhrases.filter(p => !recentIds.has(p.id));
-    const pool = fresh.length > 0 ? fresh : (candidatesPhrases.length > 0 ? candidatesPhrases : usablePhrases);
+    const fresh = phrasesToWork.filter(p => !recentIds.has(p.id));
+    const pool = fresh.length > 0 ? fresh : phrasesToWork;
 
     const phrase = pool[Math.floor(Math.random() * pool.length)];
     if (!phrase) return;
@@ -5214,10 +5336,19 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
     // Mémoriser
     recentPhrasesRef.current = [...recentPhrasesRef.current, phrase.id].slice(-5);
 
-    // Tirer un type d'exo aléatoire parmi 2 :
-    //   1. QCM traduction : phrase chinoise → choisir traduction française
-    //   2. QCM hanzi : phrase française → choisir bonne phrase chinoise
-    const subType = Math.random() < 0.5 ? 'phrase_to_fr' : 'fr_to_phrase';
+    // Choisir le type d'exo selon l'intensité
+    let subType;
+    if (config.useBothDirections) {
+      // Privilégier la direction qui n'a pas encore été validée pour cette phrase
+      const prog = phraseProgress[phrase.id] || {};
+      const ftfDone = (prog.phrase_to_fr || 0) >= config.requiredPasses;
+      const ftpDone = (prog.fr_to_phrase || 0) >= config.requiredPasses;
+      if (!ftfDone && ftpDone) subType = 'phrase_to_fr';
+      else if (ftfDone && !ftpDone) subType = 'fr_to_phrase';
+      else subType = Math.random() < 0.5 ? 'phrase_to_fr' : 'fr_to_phrase';
+    } else {
+      subType = Math.random() < 0.5 ? 'phrase_to_fr' : 'fr_to_phrase';
+    }
 
     // Distracteurs : 3 autres phrases de la leçon (différentes)
     const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
@@ -5229,7 +5360,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
 
   useEffect(() => {
     if (!phaseDone && !currentExo) pickNext();
-  }, [phaseDone, refreshKey]);
+  }, [phaseDone, phraseProgress]);
 
   if (!lesson) return <p style={{ color: C.textDim }}>Leçon introuvable.</p>;
 
@@ -5259,25 +5390,27 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
 
   if (!currentExo) return null;
 
-  // Handler unifié
+  // Handler unifié — incrémente le compteur de la phrase courante selon le type d'exo réussi
   const handleSelect = (correct, phrase) => {
     if (submitted) return;
     setSubmitted(true);
     setFeedback(correct ? 'correct' : 'wrong');
     setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
-    if (correct && phrase) {
-      // Valider in_phrase pour tous les mots de la leçon présents dans cette phrase
-      const lessonWordIds = new Set(words.map(w => w.id));
-      for (const wid of phrase.words || []) {
-        if (lessonWordIds.has(wid)) {
-          updateWordQuality(wid, 'in_phrase', true);
-        }
-      }
+    if (correct && phrase && currentExo) {
+      // Incrémenter le compteur de la direction courante pour cette phrase
+      const direction = currentExo.type; // 'phrase_to_fr' ou 'fr_to_phrase'
+      const next = { ...phraseProgress };
+      const current = next[phrase.id] || {};
+      next[phrase.id] = {
+        ...current,
+        [direction]: (current[direction] || 0) + 1,
+      };
+      persistProgress(next);
     } else if (!correct && phrase) {
       // Logger l'erreur
       logError({
         item_id: phrase.id, hanzi: phrase.hanzi, pinyin: phrase.pinyin, fr: phrase.fr,
-        facet: 'in_phrase', mode: 'lesson_phase2',
+        facet: 'phrase_qcm', mode: 'lesson_phase2',
         error_type: 'structure', user_answer: '?', correct_answer: phrase.fr,
       });
     }
@@ -5285,12 +5418,11 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
   };
 
   const handleNext = () => {
-    setRefreshKey(k => k + 1);
     pickNext();
   };
 
-  const totalToValidate = words.length;
-  const validated = words.filter(w => wordQuality[w.id]?.in_phrase).length;
+  const totalToValidate = totalPhrases;
+  const validated = validatedCount;
 
   return (
     <div className="slide-up">
@@ -5299,7 +5431,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
           background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0,
         }}>← retour</button>
         <span style={{ fontSize: 11, color: C.textDim, letterSpacing: 1 }}>
-          {validated} / {totalToValidate} mots dans phrases
+          {validated} / {totalToValidate} phrases validées
         </span>
       </div>
 
@@ -5322,7 +5454,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(244,114,182,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 28, margin: '0 0 10px', color: C.text }}>
               {currentExo.phrase.hanzi}
@@ -5337,10 +5469,10 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
               }}>♪ ÉCOUTER</button>
             )}
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quelle est la traduction ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {currentExo.options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -5349,7 +5481,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.phrase)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 13,
                 }}>{opt.fr}</button>
               );
             })}
@@ -5363,16 +5495,16 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(168,85,247,0.06), rgba(45,212,191,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 16, color: C.text, margin: 0, lineHeight: 1.5 }}>
               {currentExo.phrase.fr}
             </p>
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quelle phrase chinoise correspond ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {currentExo.options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -5381,7 +5513,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.phrase)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left',
+                  padding: 10, borderRadius: 6, textAlign: 'left',
                 }}>
                   <p className="hanzi" style={{ fontSize: 16, margin: '0 0 2px' }}>{opt.hanzi}</p>
                   <p style={{ fontSize: 10, color: C.textDim, margin: 0, letterSpacing: 0.5 }}>{opt.pinyin}</p>
@@ -5395,7 +5527,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
       {submitted && (
         <>
           <div style={{
-            padding: 12, borderRadius: 8, marginBottom: 12,
+            padding: 10, borderRadius: 6, marginBottom: 8,
             background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
             border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
           }}>
@@ -5487,26 +5619,8 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
     // Format : [{ pinyin: 'wǒ', hanzi: '我', fr: 'je, moi' }, ...]
     const text = phraseObj.hanzi.replace(/[，。?!？!；;,.]/g, '');
 
-    // Stratégie principale : utiliser le pinyin de la phrase, déjà découpé en mots/syllabes
-    // Le pinyin de la phrase est typiquement au format "wǒ shì fǎguó rén"
-    const phrasePinyin = (phraseObj.pinyin || '').replace(/[，。?!？!；;,.]/g, '').trim();
-    const pinyinTokens = phrasePinyin.split(/\s+/).filter(Boolean);
-
-    // Si on a exactement autant de syllabes pinyin que de caractères hanzi → mapping direct
-    if (pinyinTokens.length === text.length && text.length > 0) {
-      const result = [];
-      for (let i = 0; i < text.length; i++) {
-        result.push({
-          pinyin: pinyinTokens[i],
-          hanzi: text[i],
-          fr: '',
-          id: `s${i}_${phraseObj.id}`,
-        });
-      }
-      return result;
-    }
-
-    // Fallback : utiliser le vocab pour reconstruire mot par mot puis splitter en syllabes
+    // Stratégie 1 : reconstruire mot par mot via le vocab (le plus fiable)
+    // Chaque mot du vocab a son pinyin (potentiellement multi-syllabes avec/sans espace)
     const wordsByHanzi = {};
     if (phraseObj.words) {
       phraseObj.words.forEach(wid => {
@@ -5515,6 +5629,34 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       });
     }
     const sortedHanzi = Object.keys(wordsByHanzi).sort((a, b) => b.length - a.length);
+
+    // Helper : split un pinyin en syllabes individuelles
+    // Tente d'abord par espaces, sinon par regex syllabique
+    const splitPinyinIntoSyllables = (pinyin) => {
+      if (!pinyin) return [];
+      // Si déjà des espaces → split direct
+      const byWords = pinyin.split(/\s+/).filter(Boolean);
+      // Si chaque "mot" est une syllabe atomique (pas de regroupement), on retourne
+      // Sinon on doit re-découper chaque mot en syllabes
+      const syllables = [];
+      for (const w of byWords) {
+        // Une syllabe pinyin = consonne(s) initiale optionnelle + voyelles + consonne finale optionnelle
+        // Simplifications : on découpe sur les patterns voyelle+consonne_finale|voyelle_seule
+        // Regex approximative : (consonnes)?(voyelles avec ton)+(n|ng|r)?
+        const matches = w.match(/(?:[bcdfghjklmnpqrstwxyzBCDFGHJKLMNPQRSTWXYZzhchshZHCHSH]?h?|h)?[aeiouüvAEIOUÜVāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]+(?:ng|n|r)?/g);
+        if (matches && matches.length > 1) {
+          // Vérifier que la concaténation correspond bien à w
+          if (matches.join('').length === w.length) {
+            syllables.push(...matches);
+          } else {
+            syllables.push(w); // si pas exact, on garde le mot entier
+          }
+        } else {
+          syllables.push(w);
+        }
+      }
+      return syllables;
+    };
 
     const result = [];
     let i = 0;
@@ -5528,20 +5670,24 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       }
       if (matched) {
         const word = wordsByHanzi[matched];
-        const pinyinParts = word.pinyin.split(/\s+/).filter(Boolean);
         const hanziChars = matched.split('');
-        if (pinyinParts.length === hanziChars.length) {
+        // Découper le pinyin du mot en syllabes individuelles
+        const pinyinSyllables = splitPinyinIntoSyllables(word.pinyin);
+
+        if (pinyinSyllables.length === hanziChars.length) {
+          // Mapping 1 syllabe = 1 hanzi
           for (let k = 0; k < hanziChars.length; k++) {
             result.push({
-              pinyin: pinyinParts[k],
+              pinyin: pinyinSyllables[k],
               hanzi: hanziChars[k],
               fr: word.fr,
               id: `${word.id}_${k}_${phraseObj.id}`,
             });
           }
         } else {
+          // Mot composé "indissociable" — on le garde groupé
           result.push({
-            pinyin: word.pinyin,
+            pinyin: word.pinyin.replace(/\s+/g, ''),
             hanzi: matched,
             fr: word.fr,
             id: `${word.id}_${phraseObj.id}`,
@@ -5549,17 +5695,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
         }
         i += matched.length;
       } else {
-        // Caractère pas dans vocab — on tente d'extraire le pinyin correspondant depuis le pinyin global
-        // Si on a autant de pinyin tokens que de hanzi, on prend le pinyin à la position i
-        if (pinyinTokens.length === text.length && pinyinTokens[i]) {
-          result.push({
-            pinyin: pinyinTokens[i],
-            hanzi: text[i],
-            fr: '',
-            id: `fallback_${i}_${phraseObj.id}`,
-          });
-        }
-        // Sinon on SAUTE ce caractère pour ne pas afficher de hanzi parasite
+        // Caractère pas dans vocab : on saute (ne PAS mettre de hanzi sur les boutons)
         i++;
       }
     }
@@ -5601,12 +5737,15 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
     } else if (subMode === 'tap_fr_to_pinyin' || subMode === 'tap_pinyin_to_fr') {
       // Tap word : on doit reconstruire la phrase syllabe pinyin par syllabe pinyin
       const tokens = tokenizePhrase(phrase);
-      if (tokens.length === 0) return pickNext(); // fallback
+      // Filtrer tout token qui aurait un hanzi dans son champ pinyin (sécurité)
+      const cleanTokens = tokens.filter(t => t.pinyin && !/[\u4e00-\u9fa5]/.test(t.pinyin));
+      if (cleanTokens.length === 0) return pickNext(); // fallback
       // Distracteurs : 2-3 syllabes pinyin d'autres phrases qui ne sont pas dans la phrase courante
-      const correctPinyins = new Set(tokens.map(t => t.pinyin));
+      const correctPinyins = new Set(cleanTokens.map(t => t.pinyin));
       const otherTokens = phrases
         .filter(p => p.id !== phrase.id)
         .flatMap(p => tokenizePhrase(p))
+        .filter(t => t.pinyin && !/[\u4e00-\u9fa5]/.test(t.pinyin)) // pinyin propre uniquement
         .filter(t => !correctPinyins.has(t.pinyin));
       // Dédupliquer par pinyin
       const seenPinyin = new Set();
@@ -5619,13 +5758,13 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       }
       const distractors = uniqueDistractors
         .sort(() => Math.random() - 0.5)
-        .slice(0, Math.min(3, Math.max(2, Math.floor(tokens.length / 3))));
+        .slice(0, Math.min(3, Math.max(2, Math.floor(cleanTokens.length / 3))));
       const allTokens = [
-        ...tokens.map((t, i) => ({ ...t, key: `t_${i}_${Math.random()}`, isCorrect: true })),
+        ...cleanTokens.map((t, i) => ({ ...t, key: `t_${i}_${Math.random()}`, isCorrect: true })),
         ...distractors.map((t, i) => ({ ...t, key: `d_${i}_${Math.random()}`, isCorrect: false })),
       ];
       setTapAvailable(allTokens.sort(() => Math.random() - 0.5));
-      setCurrentExo({ subMode, phrase, tokens });
+      setCurrentExo({ subMode, phrase, tokens: cleanTokens });
     } else {
       // fill_pinyin : tape le pinyin de la phrase
       setCurrentExo({ subMode, phrase });
@@ -5755,14 +5894,14 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 16, color: C.text, margin: 0 }}>{phrase.fr}</p>
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quel pinyin correspond ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {currentExo.options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -5771,7 +5910,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt.id === phrase.id)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13, letterSpacing: 0.5,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 13, letterSpacing: 0.5,
                   fontFamily: 'monospace',
                 }}>{opt.pinyin}</button>
               );
@@ -5786,7 +5925,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(244,114,182,0.05), rgba(168,85,247,0.03))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '0 0 6px' }}>{phrase.hanzi}</p>
             <p style={{ fontSize: 12, color: C.textDim, margin: 0 }}>{phrase.pinyin}</p>
@@ -5797,10 +5936,10 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
               }}>♪ ÉCOUTER</button>
             )}
           </div>
-          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 8px' }}>
             Quelle traduction ?
           </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {currentExo.options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) {
@@ -5809,7 +5948,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt.id === phrase.id)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 13,
                 }}>{opt.fr}</button>
               );
             })}
@@ -5823,7 +5962,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(251,191,36,0.05), rgba(244,114,182,0.03))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '18px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             {currentExo.subMode === 'tap_fr_to_pinyin' ? (
               <p style={{ fontSize: 15, color: C.text, margin: 0 }}>{phrase.fr}</p>
@@ -5866,7 +6005,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
                   background: C.bgElevated, border: `0.5px solid ${C.borderAccent}`,
                   color: C.text, padding: '6px 10px', borderRadius: 6, fontSize: 14,
                   fontFamily: 'monospace', letterSpacing: 0.5,
-                }}>{displayPinyin(t.pinyin)}</button>
+                }}>{(/[\u4e00-\u9fa5]/.test(t.pinyin)) ? '?' : displayPinyin(t.pinyin)}</button>
             ))}
           </div>
 
@@ -5880,7 +6019,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
                       background: C.bgCard, border: `0.5px solid ${C.border}`,
                       color: C.text, padding: '8px 12px', borderRadius: 6, fontSize: 14,
                       fontFamily: 'monospace', letterSpacing: 0.5,
-                    }}>{displayPinyin(t.pinyin)}</button>
+                    }}>{(/[\u4e00-\u9fa5]/.test(t.pinyin)) ? '?' : displayPinyin(t.pinyin)}</button>
                 ))}
               </div>
               <button onClick={checkTapAnswer} disabled={tapBuilt.length === 0} style={{
@@ -5900,7 +6039,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.05), rgba(244,114,182,0.03))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '18px 16px', marginBottom: 14, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 22, color: C.text, margin: '0 0 6px' }}>{phrase.hanzi}</p>
             <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>{phrase.fr}</p>
@@ -5937,7 +6076,7 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       {submitted && (
         <>
           <div style={{
-            padding: 12, borderRadius: 8, marginBottom: 12,
+            padding: 10, borderRadius: 6, marginBottom: 8,
             background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
             border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
           }}>
@@ -6159,20 +6298,20 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.08), rgba(168,85,247,0.06))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 44, margin: 0, color: C.text, fontWeight: 300 }}>{word.hanzi}</p>
             <p style={{ fontSize: 12, color: C.textDim, margin: '8px 0 0' }}>{word.pinyin}</p>
           </div>
           <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>Quel sens ?</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) { if (opt.id === word.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; } }
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 13,
                 }}>{opt.fr}</button>
               );
             })}
@@ -6186,19 +6325,19 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(244,114,182,0.06), rgba(168,85,247,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '20px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 18, margin: 0, color: C.text }}>{word.fr}</p>
           </div>
           <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>Quel hanzi ?</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
             {options.map(opt => {
               let borderColor = C.border, bg = C.bgCard;
               if (submitted) { if (opt.id === word.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; } }
               return (
                 <button key={opt.id} onClick={() => handleQCMSelect(opt)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
+                  padding: 10, borderRadius: 6, textAlign: 'left', fontSize: 14,
                   display: 'flex', alignItems: 'center', gap: 10,
                 }}>
                   <span className="hanzi" style={{ fontSize: 18 }}>{opt.hanzi}</span>
@@ -6216,7 +6355,7 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(251,191,36,0.06), rgba(244,114,182,0.04))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p className="hanzi" style={{ fontSize: 36, margin: '0 0 6px', color: C.text }}>{word.hanzi}</p>
             <p style={{ fontSize: 12, color: C.textDim, margin: 0 }}>({word.fr})</p>
@@ -6248,7 +6387,7 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
           <div style={{
             background: 'linear-gradient(135deg, rgba(168,85,247,0.08), rgba(45,212,191,0.05))',
             border: `0.5px solid ${C.borderAccent}`,
-            borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
+            borderRadius: 12, padding: '14px 14px', marginBottom: 10, textAlign: 'center',
           }}>
             <p style={{ fontSize: 10, color: C.purple, letterSpacing: 2, margin: '0 0 12px' }}>ÉCOUTE</p>
             <button onClick={() => speak(word.hanzi)} style={{
@@ -6291,7 +6430,7 @@ function LessonPhase4Screen({ lessonId, onBack, onPhaseComplete }) {
       {submitted && (
         <>
           <div style={{
-            padding: 12, borderRadius: 8, marginBottom: 12,
+            padding: 10, borderRadius: 6, marginBottom: 8,
             background: feedback === 'correct' ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
             border: `0.5px solid ${feedback === 'correct' ? C.teal : C.red}`,
           }}>
@@ -6644,7 +6783,7 @@ function LessonPhase5Screen({ lessonId, onBack, onPhaseComplete }) {
         </div>
 
         {/* Options */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
           {q.options_zh.map((opt, i) => {
             let borderColor = C.border, bg = C.bgCard;
             if (isSubmitted) {
@@ -6665,7 +6804,7 @@ function LessonPhase5Screen({ lessonId, onBack, onPhaseComplete }) {
                 disabled={isSubmitted}
                 style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                  padding: 12, borderRadius: 8, textAlign: 'left',
+                  padding: 10, borderRadius: 6, textAlign: 'left',
                 }}
               >
                 <p className="hanzi" style={{ fontSize: 16, margin: '0 0 2px' }}>{opt}</p>
@@ -6688,7 +6827,7 @@ function LessonPhase5Screen({ lessonId, onBack, onPhaseComplete }) {
         ) : (
           <>
             <div style={{
-              padding: 12, borderRadius: 8, marginBottom: 12,
+              padding: 10, borderRadius: 6, marginBottom: 8,
               background: userAnswer === q.correct_index ? 'rgba(45,212,191,0.08)' : 'rgba(239,68,68,0.08)',
               border: `0.5px solid ${userAnswer === q.correct_index ? C.teal : C.red}`,
             }}>
