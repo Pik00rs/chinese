@@ -1192,11 +1192,6 @@ function HSKApp() {
             profile={profile}
             setProfile={setProfile}
             onBack={() => setScreen('home')}
-            onResetOnboarding={() => {
-              setOnboarded(false);
-              saveState('hsk_onboarded', false);
-              setScreen('onboarding');
-            }}
             onOpenPack={() => setScreen('pack')}
           />
         )}
@@ -2140,16 +2135,10 @@ function Stat({ label, value, color }) {
 // ============================================================
 // PROFILE / SETTINGS
 // ============================================================
-function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenPack }) {
+function ProfileScreen({ profile, setProfile, onBack, onOpenPack }) {
   const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'uptodate' | 'updating'
   const { canInstall, isInstalled, promptInstall } = useInstallPrompt();
   const [installResult, setInstallResult] = useState(null); // 'accepted' | 'declined' | null
-
-  const interestOptions = [
-    { id: 'hanzi', label: 'Hanzi 汉字', desc: 'Les caractères chinois', color: C.teal },
-    { id: 'pinyin', label: 'Pinyin pīnyīn', desc: 'La transcription phonétique', color: C.amber },
-    { id: 'sens', label: 'Sens / traduction', desc: 'Le sens en français', color: C.purple },
-  ];
 
   const handleInstall = async () => {
     const accepted = await promptInstall();
@@ -2186,19 +2175,6 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
     }
   };
 
-  const toggleInterest = (id) => {
-    setProfile(p => {
-      const next = p.interests.includes(id)
-        ? p.interests.filter(x => x !== id)
-        : [...p.interests, id];
-      // Garder au moins 2 cochés (sinon aucun exercice possible)
-      if (next.length < 2) return p;
-      return { ...p, interests: next };
-    });
-  };
-
-  const facetCount = deriveFacets(profile.interests).length;
-
   return (
     <div className="slide-up">
       <button onClick={onBack} style={{
@@ -2217,38 +2193,6 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
           color: C.text, padding: 12, borderRadius: 8, fontSize: 14, marginBottom: 24,
         }}
       />
-
-      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
-        CE QUE TU VEUX TRAVAILLER
-      </p>
-      <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 12px', lineHeight: 1.5 }}>
-        Minimum 2 cochés. Les exercices sont générés à partir des paires.
-      </p>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
-        {interestOptions.map(opt => {
-          const active = profile.interests.includes(opt.id);
-          return (
-            <button key={opt.id} onClick={() => toggleInterest(opt.id)} style={{
-              background: C.bgCard,
-              border: `0.5px solid ${active ? opt.color : C.border}`,
-              borderLeft: `2px solid ${active ? opt.color : C.border}`,
-              color: C.text, padding: 14, borderRadius: 0, fontSize: 13, textAlign: 'left',
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            }}>
-              <div>
-                <p style={{ margin: '0 0 2px', fontWeight: 500 }}>{opt.label}</p>
-                <p style={{ margin: 0, fontSize: 11, color: C.textDim }}>{opt.desc}</p>
-              </div>
-              <span style={{ color: active ? opt.color : C.textFaint, fontSize: 16 }}>
-                {active ? '●' : '○'}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      <p style={{ fontSize: 11, color: C.teal, margin: '0 0 24px', textAlign: 'center' }}>
-        → {facetCount} types d'exercices générés
-      </p>
 
       <div style={{ height: 1, background: C.border, margin: '24px 0' }} />
 
@@ -2393,12 +2337,6 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
         {updateStatus === 'updating' && '⟳ INSTALLATION...'}
         {updateStatus === 'uptodate' && '✓ DÉJÀ À JOUR'}
       </button>
-
-      <button onClick={onResetOnboarding} style={{
-        width: '100%', background: 'transparent', border: `0.5px solid ${C.amber}`,
-        color: C.amber, padding: 13, borderRadius: 8, fontSize: 12, letterSpacing: 1,
-        marginBottom: 8,
-      }}>↻ REFAIRE L'INTRO</button>
 
       <button onClick={() => {
         if (confirm('Réinitialiser TOUTE ta progression (mots + leçons + erreurs + calendrier) ? Cette action est irréversible.')) {
