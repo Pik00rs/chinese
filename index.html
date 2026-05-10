@@ -4658,6 +4658,9 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
   const [stats, setStats] = useState({ done: 0, correct: 0 });
   const [refreshKey, setRefreshKey] = useState(0);
 
+  // Historique des dernières questions (mot+modalité) pour éviter doublons
+  const recentExosRef = useRef([]);
+
   // Calcul de la progression
   const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
   const wordsToWork = useMemo(() => {
@@ -4668,11 +4671,9 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     });
   }, [words, wordQuality]);
 
-  // Calculer les pools de distracteurs (autres mots de la leçon + mots du même thème)
-  const distractorPool = useMemo(() => {
-    if (typeof VOCAB === 'undefined') return [];
-    return VOCAB.filter(w => w.theme === lesson.theme_code).slice(0, 50);
-  }, [lesson.theme_code]);
+  // Distracteurs prioritaires : autres mots de la même leçon (plus pertinent)
+  // Fallback : mots du même thème, puis vocab global
+  const lessonOtherWords = useMemo(() => words, [words]);
 
   // Choisir le prochain exercice
   const pickNext = () => {
@@ -4686,7 +4687,11 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       return;
     }
 
-    // Choisir un mot à travailler (priorité au moins maîtrisé)
+    // Recent : dernières N combinaisons word+modality
+    const recent = recentExosRef.current;
+    const RECENT_MAX = Math.min(6, Math.max(2, Math.floor(wordsToWork.length / 2)));
+
+    // Choisir un mot à travailler (priorité au moins maîtrisé) — qui n'a pas été vu récemment
     const sortedWords = [...wordsToWork].sort((a, b) => {
       const qa = wordQuality[a.id] || {};
       const qb = wordQuality[b.id] || {};
@@ -4694,26 +4699,42 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
       const scoreB = (qb.qcm_zh_fr ? 1 : 0) + (qb.qcm_fr_zh ? 1 : 0) + (qb.fill_manual ? 1 : 0) + (qb.audio ? 1 : 0);
       return scoreA - scoreB; // moins maîtrisé d'abord
     });
-    const word = sortedWords[Math.floor(Math.random() * Math.min(3, sortedWords.length))];
+
+    // Filter out les mots vus récemment (sauf si on n'en a plus assez)
+    const recentWordIds = new Set(recent.slice(-Math.floor(RECENT_MAX / 2)).map(r => r.wordId));
+    const freshWords = sortedWords.filter(w => !recentWordIds.has(w.id));
+    const candidatePool = freshWords.length >= 2 ? freshWords : sortedWords;
+
+    // Pick parmi les top 3 candidats
+    const word = candidatePool[Math.floor(Math.random() * Math.min(3, candidatePool.length))];
 
     // Choisir la modalité non encore validée pour ce mot
     const q = wordQuality[word.id] || {};
-    const modalities = [];
-    if (!q.qcm_zh_fr) modalities.push('qcm_zh_fr');
-    if (!q.qcm_fr_zh) modalities.push('qcm_fr_zh');
-    if (!q.fill_manual) modalities.push('fill_manual');
-    if (!q.audio && isTTSAvailable()) modalities.push('audio');
+    const allModalities = [];
+    if (!q.qcm_zh_fr) allModalities.push('qcm_zh_fr');
+    if (!q.qcm_fr_zh) allModalities.push('qcm_fr_zh');
+    if (!q.fill_manual) allModalities.push('fill_manual');
+    if (!q.audio && isTTSAvailable()) allModalities.push('audio');
 
-    const modality = modalities[Math.floor(Math.random() * modalities.length)];
+    // Filter out modality vue récemment pour ce mot précis
+    const recentForThisWord = recent.filter(r => r.wordId === word.id).map(r => r.modality);
+    const freshModalities = allModalities.filter(m => !recentForThisWord.includes(m));
+    const pickFromModalities = freshModalities.length > 0 ? freshModalities : allModalities;
+
+    const modality = pickFromModalities[Math.floor(Math.random() * pickFromModalities.length)];
+
+    // Mémoriser pour éviter répétition
+    recentExosRef.current = [...recent, { wordId: word.id, modality }].slice(-RECENT_MAX);
 
     // Construire l'exercice
     if (modality === 'qcm_zh_fr' || modality === 'qcm_fr_zh') {
-      // Distracteurs : 3 autres mots du même thème, ou de la leçon, ou globaux
-      let candidates = distractorPool.filter(w => w.id !== word.id);
+      // Distracteurs prioritaires : autres mots de la leçon (plus pertinent et plus stimulant)
+      let candidates = lessonOtherWords.filter(w => w.id !== word.id);
       if (candidates.length < 3) {
-        candidates = (typeof VOCAB !== 'undefined' ? VOCAB : []).filter(w => w.id !== word.id);
+        // Fallback : vocab global avec même thème ou aléatoire
+        const fallback = (typeof VOCAB !== 'undefined' ? VOCAB : []).filter(w => w.id !== word.id);
+        candidates = [...candidates, ...fallback];
       }
-      // Mélanger
       const distractors = [...candidates].sort(() => Math.random() - 0.5).slice(0, 3);
       const all = [...distractors, word].sort(() => Math.random() - 0.5);
       setCurrentExo({ word, modality, options: all });
@@ -5099,19 +5120,20 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
     [lessonId]
   );
 
-  // Phrases courtes à utiliser pour cette phase (≤10 caractères + au moins 2 mots de la leçon)
-  const shortPhrases = useMemo(() => {
-    const wordSet = new Set(words.map(w => w.id));
-    return allLessonPhrases.filter(p =>
-      p.hanzi.length <= 10 && p.words && p.words.filter(wid => wordSet.has(wid)).length >= 1
-    );
-  }, [allLessonPhrases, words]);
+  // Phrases utilisables : toutes les phrases de la leçon (le mapping est strict, donc déjà filtré)
+  // On préfère les courtes/moyennes pour la phase 2
+  const usablePhrases = useMemo(() => {
+    return allLessonPhrases.filter(p => p.hanzi.length <= 14);
+  }, [allLessonPhrases]);
 
   const [currentExo, setCurrentExo] = useState(null);
   const [submitted, setSubmitted] = useState(false);
   const [feedback, setFeedback] = useState(null);
   const [stats, setStats] = useState({ done: 0, correct: 0 });
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Anti-répétition
+  const recentPhrasesRef = useRef([]);
 
   const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
 
@@ -5120,7 +5142,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
     return words.filter(w => !(wordQuality[w.id]?.in_phrase));
   }, [words, wordQuality]);
 
-  const phaseDone = wordsToWork.length === 0;
+  const phaseDone = wordsToWork.length === 0 || usablePhrases.length === 0;
 
   const pickNext = () => {
     setSubmitted(false);
@@ -5130,40 +5152,34 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
       return;
     }
 
-    // Stratégie : alterner entre exo "phrase contenant un mot cible" (60%) et "QCM mot rapide" (40%)
-    // Mais si pas de phrases dispo, on fait que des QCM
-    const useSentence = shortPhrases.length > 0 && Math.random() < 0.7;
+    // Choisir une phrase qui contient au moins un mot pas encore validé in_phrase
+    const wordsToWorkIds = new Set(wordsToWork.map(w => w.id));
+    const candidatesPhrases = usablePhrases.filter(p =>
+      p.words.some(wid => wordsToWorkIds.has(wid))
+    );
 
-    if (useSentence) {
-      // Choisir une phrase qui contient au moins un mot non-validé
-      const wordsToWorkIds = new Set(wordsToWork.map(w => w.id));
-      const candidatesPhrases = shortPhrases.filter(p =>
-        p.words.some(wid => wordsToWorkIds.has(wid))
-      );
-      const phrase = candidatesPhrases.length > 0
-        ? candidatesPhrases[Math.floor(Math.random() * candidatesPhrases.length)]
-        : shortPhrases[Math.floor(Math.random() * shortPhrases.length)];
+    // Filter récentes
+    const recentIds = new Set(recentPhrasesRef.current.slice(-3));
+    const fresh = candidatesPhrases.filter(p => !recentIds.has(p.id));
+    const pool = fresh.length > 0 ? fresh : (candidatesPhrases.length > 0 ? candidatesPhrases : usablePhrases);
 
-      // Choisir le mot cible dans cette phrase
-      const targetWordId = phrase.words.find(wid => wordsToWorkIds.has(wid)) || phrase.words[0];
-      const targetWord = getWordById(targetWordId);
-      if (!targetWord) {
-        // fallback QCM mot
-        const w = wordsToWork[Math.floor(Math.random() * wordsToWork.length)];
-        return setCurrentExo({ type: 'word_quick_qcm', word: w });
-      }
+    const phrase = pool[Math.floor(Math.random() * pool.length)];
+    if (!phrase) return;
 
-      // Un seul type d'exo phrase : "Cette phrase signifie quoi ?" (QCM traduction)
-      // Distracteurs : autres phrases de la leçon courante
-      const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
-      const shuffledP = [...otherPhrases].sort(() => Math.random() - 0.5).slice(0, 3);
-      const opts = [phrase, ...shuffledP].sort(() => Math.random() - 0.5);
-      setCurrentExo({ type: 'phrase_translate_qcm', phrase, targetWord, options: opts });
-    } else {
-      // QCM rapide mot pour rafraîchir
-      const word = wordsToWork[Math.floor(Math.random() * wordsToWork.length)];
-      setCurrentExo({ type: 'word_quick_qcm', word });
-    }
+    // Mémoriser
+    recentPhrasesRef.current = [...recentPhrasesRef.current, phrase.id].slice(-5);
+
+    // Tirer un type d'exo aléatoire parmi 2 :
+    //   1. QCM traduction : phrase chinoise → choisir traduction française
+    //   2. QCM hanzi : phrase française → choisir bonne phrase chinoise
+    const subType = Math.random() < 0.5 ? 'phrase_to_fr' : 'fr_to_phrase';
+
+    // Distracteurs : 3 autres phrases de la leçon (différentes)
+    const otherPhrases = allLessonPhrases.filter(p => p.id !== phrase.id);
+    const shuffledP = [...otherPhrases].sort(() => Math.random() - 0.5).slice(0, 3);
+    const opts = [phrase, ...shuffledP].sort(() => Math.random() - 0.5);
+
+    setCurrentExo({ type: subType, phrase, options: opts });
   };
 
   useEffect(() => {
@@ -5199,23 +5215,26 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
   if (!currentExo) return null;
 
   // Handler unifié
-  const handleSelect = (correct, targetWordId) => {
+  const handleSelect = (correct, phrase) => {
     if (submitted) return;
     setSubmitted(true);
     setFeedback(correct ? 'correct' : 'wrong');
     setStats(s => ({ done: s.done + 1, correct: s.correct + (correct ? 1 : 0) }));
-    if (correct && targetWordId) {
-      updateWordQuality(targetWordId, 'in_phrase', true);
-    } else if (!correct && targetWordId) {
-      updateWordQuality(targetWordId, 'in_phrase', false);
-      const w = getWordById(targetWordId);
-      if (w) {
-        logError({
-          item_id: w.id, hanzi: w.hanzi, pinyin: w.pinyin, fr: w.fr,
-          facet: 'in_phrase', mode: 'lesson_phase2',
-          error_type: 'unknown', user_answer: '?', correct_answer: w.fr,
-        });
+    if (correct && phrase) {
+      // Valider in_phrase pour tous les mots de la leçon présents dans cette phrase
+      const lessonWordIds = new Set(words.map(w => w.id));
+      for (const wid of phrase.words || []) {
+        if (lessonWordIds.has(wid)) {
+          updateWordQuality(wid, 'in_phrase', true);
+        }
       }
+    } else if (!correct && phrase) {
+      // Logger l'erreur
+      logError({
+        item_id: phrase.id, hanzi: phrase.hanzi, pinyin: phrase.pinyin, fr: phrase.fr,
+        facet: 'in_phrase', mode: 'lesson_phase2',
+        error_type: 'structure', user_answer: '?', correct_answer: phrase.fr,
+      });
     }
     markActivity(1);
   };
@@ -5252,48 +5271,8 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
       </div>
 
       {/* QCM rapide sur un mot (pour rafraîchir) */}
-      {currentExo.type === 'word_quick_qcm' && (() => {
-        const w = currentExo.word;
-        const distractors = words.filter(x => x.id !== w.id);
-        const opts = [...distractors.sort(() => Math.random() - 0.5).slice(0, 3), w].sort(() => Math.random() - 0.5);
-        return (
-          <>
-            <div style={{
-              background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(168,85,247,0.04))',
-              border: `0.5px solid ${C.borderAccent}`,
-              borderRadius: 12, padding: '24px 16px', marginBottom: 16, textAlign: 'center',
-            }}>
-              <p className="hanzi" style={{ fontSize: 42, margin: 0, color: C.text, fontWeight: 300 }}>
-                {w.hanzi}
-              </p>
-              <p style={{ fontSize: 12, color: C.textDim, margin: '8px 0 0' }}>
-                {w.pinyin}
-              </p>
-            </div>
-            <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
-              Quel sens ?
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              {opts.map(opt => {
-                let borderColor = C.border, bg = C.bgCard;
-                if (submitted) {
-                  if (opt.id === w.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
-                }
-                return (
-                  <button key={opt.id} onClick={() => handleSelect(opt.id === w.id, w.id)} disabled={submitted} style={{
-                    background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
-                    padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 14,
-                  }}>{opt.fr}</button>
-                );
-              })}
-            </div>
-          </>
-        );
-      })()}
-
-      {/* "Quel mot signifie X dans cette phrase ?" */}
-      {/* "Cette phrase signifie quoi ?" */}
-      {currentExo.type === 'phrase_translate_qcm' && (
+      {/* Type 1 : phrase chinoise → choisir la bonne traduction française */}
+      {currentExo.type === 'phrase_to_fr' && (
         <>
           <div style={{
             background: 'linear-gradient(135deg, rgba(45,212,191,0.06), rgba(244,114,182,0.04))',
@@ -5314,7 +5293,7 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
             )}
           </div>
           <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
-            Quelle traduction ?
+            Quelle est la traduction ?
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
             {currentExo.options.map(opt => {
@@ -5323,10 +5302,45 @@ function LessonPhase2Screen({ lessonId, onBack, onPhaseComplete }) {
                 if (opt.id === currentExo.phrase.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
               }
               return (
-                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.targetWord.id)} disabled={submitted} style={{
+                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.phrase)} disabled={submitted} style={{
                   background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
                   padding: 12, borderRadius: 8, textAlign: 'left', fontSize: 13,
                 }}>{opt.fr}</button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Type 2 : phrase française → choisir la bonne phrase chinoise */}
+      {currentExo.type === 'fr_to_phrase' && (
+        <>
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(168,85,247,0.06), rgba(45,212,191,0.04))',
+            border: `0.5px solid ${C.borderAccent}`,
+            borderRadius: 12, padding: '20px 16px', marginBottom: 14, textAlign: 'center',
+          }}>
+            <p style={{ fontSize: 16, color: C.text, margin: 0, lineHeight: 1.5 }}>
+              {currentExo.phrase.fr}
+            </p>
+          </div>
+          <p style={{ textAlign: 'center', fontSize: 12, color: C.textDim, margin: '0 0 14px' }}>
+            Quelle phrase chinoise correspond ?
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {currentExo.options.map(opt => {
+              let borderColor = C.border, bg = C.bgCard;
+              if (submitted) {
+                if (opt.id === currentExo.phrase.id) { borderColor = C.teal; bg = 'rgba(45,212,191,0.08)'; }
+              }
+              return (
+                <button key={opt.id} onClick={() => handleSelect(opt.id === currentExo.phrase.id, currentExo.phrase)} disabled={submitted} style={{
+                  background: bg, border: `0.5px solid ${borderColor}`, color: C.text,
+                  padding: 12, borderRadius: 8, textAlign: 'left',
+                }}>
+                  <p className="hanzi" style={{ fontSize: 16, margin: '0 0 2px' }}>{opt.hanzi}</p>
+                  <p style={{ fontSize: 10, color: C.textDim, margin: 0, letterSpacing: 0.5 }}>{opt.pinyin}</p>
+                </button>
               );
             })}
           </div>
@@ -5421,30 +5435,38 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
   // Tokeniser une phrase en "mots" présents dans le vocab (par greedy match)
   const tokenizePhrase = (phraseObj) => {
     // Découpe en SYLLABES PINYIN (chaque "syllabe" = 1 caractère hanzi de la phrase)
-    // Format : [{ pinyin: 'wǒ', hanzi: '我', fr: 'je, moi' }, { pinyin: 'shì', hanzi: '是', fr: 'être' }, ...]
+    // Format : [{ pinyin: 'wǒ', hanzi: '我', fr: 'je, moi' }, ...]
     const text = phraseObj.hanzi.replace(/[，。?!？!；;,.]/g, '');
-    if (!phraseObj.words || phraseObj.words.length === 0) {
-      // Fallback : on découpe le pinyin sur les espaces (chaque mot pinyin = 1 syllabe approx)
-      const pinyinSyllables = phraseObj.pinyin
-        ? phraseObj.pinyin.replace(/[，。?!？!；;,.]/g, '').split(/\s+/).filter(Boolean)
-        : [];
-      return pinyinSyllables.map((p, i) => ({
-        pinyin: p,
-        hanzi: text[i] || '',
-        fr: '',
-        id: `s${i}`,
-      }));
+
+    // Stratégie principale : utiliser le pinyin de la phrase, déjà découpé en mots/syllabes
+    // Le pinyin de la phrase est typiquement au format "wǒ shì fǎguó rén"
+    const phrasePinyin = (phraseObj.pinyin || '').replace(/[，。?!？!；;,.]/g, '').trim();
+    const pinyinTokens = phrasePinyin.split(/\s+/).filter(Boolean);
+
+    // Si on a exactement autant de syllabes pinyin que de caractères hanzi → mapping direct
+    if (pinyinTokens.length === text.length && text.length > 0) {
+      const result = [];
+      for (let i = 0; i < text.length; i++) {
+        result.push({
+          pinyin: pinyinTokens[i],
+          hanzi: text[i],
+          fr: '',
+          id: `s${i}_${phraseObj.id}`,
+        });
+      }
+      return result;
     }
 
-    // Construire un map hanzi → mot vocab
+    // Fallback : utiliser le vocab pour reconstruire mot par mot puis splitter en syllabes
     const wordsByHanzi = {};
-    phraseObj.words.forEach(wid => {
-      const w = getWordById(wid);
-      if (w) wordsByHanzi[w.hanzi] = w;
-    });
+    if (phraseObj.words) {
+      phraseObj.words.forEach(wid => {
+        const w = getWordById(wid);
+        if (w) wordsByHanzi[w.hanzi] = w;
+      });
+    }
     const sortedHanzi = Object.keys(wordsByHanzi).sort((a, b) => b.length - a.length);
 
-    // Greedy match dans hanzi pour récupérer les mots, mais on les SPLIT ensuite en SYLLABES
     const result = [];
     let i = 0;
     while (i < text.length) {
@@ -5457,32 +5479,38 @@ function LessonPhase3Screen({ lessonId, onBack, onPhaseComplete }) {
       }
       if (matched) {
         const word = wordsByHanzi[matched];
-        // Split le pinyin du mot en syllabes (par espace ou apostrophe ou par caractère)
         const pinyinParts = word.pinyin.split(/\s+/).filter(Boolean);
         const hanziChars = matched.split('');
-        // Si on a autant de syllabes que de hanzi, on les associe
         if (pinyinParts.length === hanziChars.length) {
           for (let k = 0; k < hanziChars.length; k++) {
             result.push({
               pinyin: pinyinParts[k],
               hanzi: hanziChars[k],
               fr: word.fr,
-              id: `${word.id}_${k}`,
+              id: `${word.id}_${k}_${phraseObj.id}`,
             });
           }
         } else {
-          // Sinon on fusionne tout en un seul token (mot composé inséparable)
           result.push({
             pinyin: word.pinyin,
             hanzi: matched,
             fr: word.fr,
-            id: `${word.id}`,
+            id: `${word.id}_${phraseObj.id}`,
           });
         }
         i += matched.length;
       } else {
-        // Caractère inconnu, on garde comme syllabe individuelle
-        result.push({ hanzi: text[i], pinyin: text[i], fr: '', id: `unknown_${i}` });
+        // Caractère pas dans vocab — on tente d'extraire le pinyin correspondant depuis le pinyin global
+        // Si on a autant de pinyin tokens que de hanzi, on prend le pinyin à la position i
+        if (pinyinTokens.length === text.length && pinyinTokens[i]) {
+          result.push({
+            pinyin: pinyinTokens[i],
+            hanzi: text[i],
+            fr: '',
+            id: `fallback_${i}_${phraseObj.id}`,
+          });
+        }
+        // Sinon on SAUTE ce caractère pour ne pas afficher de hanzi parasite
         i++;
       }
     }
