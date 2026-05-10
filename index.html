@@ -663,10 +663,35 @@ function startLesson(lessonId) {
       completed_at: null,
       current_phase: 1,
       phase_progress: {},
+      intensity: null, // 'light' | 'normal' | 'deep' - choisie par l'utilisateur avant Phase 1
     };
     saveLessonProgress(progress);
   }
   return progress[lessonId];
+}
+
+// Définir l'intensité d'une leçon (light=2 modalités, normal=3, deep=4)
+function setLessonIntensity(lessonId, intensity) {
+  const progress = loadLessonProgress();
+  if (!progress[lessonId]) startLesson(lessonId);
+  progress[lessonId].intensity = intensity;
+  saveLessonProgress(progress);
+}
+
+// Récupérer l'intensité (par défaut 'normal' si pas définie)
+function getLessonIntensity(lessonId) {
+  const progress = loadLessonProgress();
+  return progress[lessonId]?.intensity || null;
+}
+
+// Quelles modalités sont actives selon l'intensité ?
+function getActiveModalities(intensity) {
+  // Light: QCM zh→fr + fill → 2 modalités
+  // Normal: QCM zh→fr + QCM fr→zh + fill → 3 modalités
+  // Deep: les 4 (avec audio si TTS dispo)
+  if (intensity === 'light') return ['qcm_zh_fr', 'fill_manual'];
+  if (intensity === 'deep') return ['qcm_zh_fr', 'qcm_fr_zh', 'fill_manual', 'audio'];
+  return ['qcm_zh_fr', 'qcm_fr_zh', 'fill_manual']; // 'normal' par défaut
 }
 
 // Mettre à jour la phase d'une leçon
@@ -1139,7 +1164,13 @@ function HSKApp() {
                 // Lancer la phase courante (par défaut 1)
                 const progress = loadLessonProgress()[id];
                 const phase = progress?.current_phase || 1;
-                setScreen(`lessonphase${Math.min(phase, 5)}`);
+                const targetPhase = Math.min(phase, 5);
+                // Si Phase 1 et intensité pas encore choisie : écran intensité
+                if (targetPhase === 1 && !progress?.intensity) {
+                  setScreen('lessonintensity');
+                } else {
+                  setScreen(`lessonphase${targetPhase}`);
+                }
               } else {
                 setScreen(m);
               }
@@ -1259,6 +1290,25 @@ function HSKApp() {
             onStart={(id) => {
               startLesson(id);
               const progress = loadLessonProgress()[id];
+              const phase = progress?.current_phase || 1;
+              const targetPhase = Math.min(phase, 5);
+              // Si Phase 1 et intensité pas encore choisie : passage par l'écran intensité
+              if (targetPhase === 1 && !progress?.intensity) {
+                setScreen('lessonintensity');
+              } else {
+                setScreen(`lessonphase${targetPhase}`);
+              }
+            }}
+            onChangeIntensity={() => setScreen('lessonintensity')}
+          />
+        )}
+        {screen === 'lessonintensity' && selectedLessonId && (
+          <LessonIntensityScreen
+            lessonId={selectedLessonId}
+            onBack={() => setScreen('lessondetail')}
+            onChosen={(intensity) => {
+              setLessonIntensity(selectedLessonId, intensity);
+              const progress = loadLessonProgress()[selectedLessonId];
               const phase = progress?.current_phase || 1;
               setScreen(`lessonphase${Math.min(phase, 5)}`);
             }}
@@ -1429,7 +1479,7 @@ function HomeScreen({ stats, profile, streak, onStartSession, onProfile, onMode,
         <div>
           <p style={{ fontSize: 14, margin: '0 0 3px' }}>{profile.name}</p>
           <p style={{ fontSize: 11, color: C.textDim, margin: 0 }}>
-            {profile.interests.join(' · ')} · session {profile.sessionSize || 15}
+            {profile.audioEnabled !== false ? '♪ audio' : '○ silencieux'} · {profile.pinyinTones !== false ? 'pinyin avec tons' : 'sans tons'}
           </p>
         </div>
         <span style={{ color: C.teal, fontSize: 18 }}>›</span>
@@ -2183,24 +2233,6 @@ function ProfileScreen({ profile, setProfile, onBack, onResetOnboarding, onOpenP
       <p style={{ fontSize: 11, color: C.teal, margin: '0 0 24px', textAlign: 'center' }}>
         → {facetCount} types d'exercices générés
       </p>
-
-      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 10px' }}>
-        TAILLE DE SESSION : {profile.sessionSize}
-      </p>
-      <input
-        type="range" min="5" max="40" value={profile.sessionSize}
-        onChange={e => setProfile({ ...profile, sessionSize: parseInt(e.target.value) })}
-        style={{ width: '100%', marginBottom: 24 }}
-      />
-
-      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 10px' }}>
-        RATIO NOUVEAUX : {Math.round(profile.newRatio * 100)}%
-      </p>
-      <input
-        type="range" min="0" max="100" value={profile.newRatio * 100}
-        onChange={e => setProfile({ ...profile, newRatio: parseInt(e.target.value) / 100 })}
-        style={{ width: '100%', marginBottom: 24 }}
-      />
 
       <div style={{ height: 1, background: C.border, margin: '24px 0' }} />
 
@@ -4447,7 +4479,7 @@ function LessonsListScreen({ onBack, onSelectLesson }) {
 // ============================================================
 // LESSON DETAIL — Vue d'une leçon avant de la lancer
 // ============================================================
-function LessonDetailScreen({ lessonId, onBack, onStart }) {
+function LessonDetailScreen({ lessonId, onBack, onStart, onChangeIntensity }) {
   const lesson = getLessonById(lessonId);
   if (!lesson) {
     return (
@@ -4633,9 +4665,26 @@ function LessonDetailScreen({ lessonId, onBack, onStart }) {
         background: isCompleted ? C.purple : C.teal,
         color: C.bg, border: 'none', padding: 14, borderRadius: 8,
         fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
+        marginBottom: 8,
       }}>
         {isCompleted ? '↻ REVOIR LA LEÇON' : progress ? 'CONTINUER →' : 'COMMENCER →'}
       </button>
+
+      {/* Bouton changer intensité (visible si Phase 1 pas encore complétée) */}
+      {progress?.intensity && !progress?.phase_progress?.[1] && onChangeIntensity && (() => {
+        const intensityLabels = { light: 'Léger', normal: 'Normal', deep: 'Approfondi' };
+        return (
+          <button onClick={onChangeIntensity} style={{
+            width: '100%',
+            background: 'transparent',
+            border: `0.5px solid ${C.border}`,
+            color: C.textDim, padding: 10, borderRadius: 8,
+            fontSize: 11, letterSpacing: 0.5,
+          }}>
+            ◐ Intensité actuelle : {intensityLabels[progress.intensity]} · changer
+          </button>
+        );
+      })()}
     </div>
   );
 }
@@ -4649,6 +4698,15 @@ function LessonDetailScreen({ lessonId, onBack, onStart }) {
 function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
   const lesson = getLessonById(lessonId);
   const words = lesson.word_ids.map(id => getWordById(id)).filter(Boolean);
+
+  // Récupérer l'intensité choisie pour cette leçon (par défaut 'normal')
+  const intensity = getLessonIntensity(lessonId) || 'normal';
+  const activeModalities = useMemo(() => {
+    let mods = getActiveModalities(intensity);
+    // Si TTS pas dispo et 'audio' demandé, on le retire
+    if (!isTTSAvailable()) mods = mods.filter(m => m !== 'audio');
+    return mods;
+  }, [intensity]);
 
   // État de l'exercice courant
   const [currentExo, setCurrentExo] = useState(null); // { word, modality, options/input }
@@ -4664,15 +4722,14 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
   // Calcul de la progression
   const wordQuality = useMemo(() => loadWordQuality(), [refreshKey]);
   const wordsToWork = useMemo(() => {
-    // Mots dont la modalité QCM ou fill_manual n'est pas encore validée
+    // Un mot est "à travailler" si TOUTES les modalités actives ne sont pas validées
     return words.filter(w => {
       const q = wordQuality[w.id] || {};
-      return !(q.qcm_zh_fr && q.qcm_fr_zh && q.fill_manual && q.audio);
+      return activeModalities.some(mod => !q[mod]);
     });
-  }, [words, wordQuality]);
+  }, [words, wordQuality, activeModalities]);
 
   // Distracteurs prioritaires : autres mots de la même leçon (plus pertinent)
-  // Fallback : mots du même thème, puis vocab global
   const lessonOtherWords = useMemo(() => words, [words]);
 
   // Choisir le prochain exercice
@@ -4708,13 +4765,9 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     // Pick parmi les top 3 candidats
     const word = candidatePool[Math.floor(Math.random() * Math.min(3, candidatePool.length))];
 
-    // Choisir la modalité non encore validée pour ce mot
+    // Choisir la modalité non encore validée pour ce mot, parmi les modalités actives
     const q = wordQuality[word.id] || {};
-    const allModalities = [];
-    if (!q.qcm_zh_fr) allModalities.push('qcm_zh_fr');
-    if (!q.qcm_fr_zh) allModalities.push('qcm_fr_zh');
-    if (!q.fill_manual) allModalities.push('fill_manual');
-    if (!q.audio && isTTSAvailable()) allModalities.push('audio');
+    const allModalities = activeModalities.filter(m => !q[m]);
 
     // Filter out modality vue récemment pour ce mot précis
     const recentForThisWord = recent.filter(r => r.wordId === word.id).map(r => r.modality);
@@ -4869,10 +4922,10 @@ function LessonPhase1Screen({ lessonId, onBack, onPhaseComplete }) {
     pickNext();
   };
 
-  const totalToValidate = words.length * (isTTSAvailable() ? 4 : 3);
+  const totalToValidate = words.length * activeModalities.length;
   const validated = words.reduce((sum, w) => {
     const q = wordQuality[w.id] || {};
-    return sum + (q.qcm_zh_fr ? 1 : 0) + (q.qcm_fr_zh ? 1 : 0) + (q.fill_manual ? 1 : 0) + (isTTSAvailable() && q.audio ? 1 : 0);
+    return sum + activeModalities.filter(m => q[m]).length;
   }, 0);
 
   return (
@@ -6690,6 +6743,122 @@ function LessonPhase5Screen({ lessonId, onBack, onPhaseComplete }) {
           padding: '12px 28px', borderRadius: 8, fontWeight: 600, fontSize: 14, letterSpacing: 0.5,
         }}>RETOUR À LA LEÇON</button>
       </div>
+    </div>
+  );
+}
+
+
+// ============================================================
+// LESSON INTENSITY — choisir le niveau d'approfondissement avant Phase 1
+// 3 options : Light (2 modalités), Normal (3), Approfondi (4)
+// ============================================================
+function LessonIntensityScreen({ lessonId, onBack, onChosen }) {
+  const lesson = getLessonById(lessonId);
+  if (!lesson) return null;
+
+  const wordCount = lesson.word_ids.length;
+  const ttsAvailable = isTTSAvailable();
+  const currentIntensity = getLessonIntensity(lessonId);
+
+  const options = [
+    {
+      key: 'light',
+      label: 'Léger',
+      icon: '◐',
+      color: C.teal,
+      modalities: 2,
+      validations: wordCount * 2,
+      time: `~${Math.round(wordCount * 2 * 0.4)} min`,
+      desc: 'QCM hanzi→sens + écriture pinyin',
+      detail: 'Idéal pour découvrir vite ou réviser',
+    },
+    {
+      key: 'normal',
+      label: 'Normal',
+      icon: '●',
+      color: C.purple,
+      modalities: 3,
+      validations: wordCount * 3,
+      time: `~${Math.round(wordCount * 3 * 0.4)} min`,
+      desc: 'QCM bidirectionnels + écriture pinyin',
+      detail: 'Apprentissage solide, recommandé',
+    },
+    {
+      key: 'deep',
+      label: 'Approfondi',
+      icon: '◉',
+      color: C.amber,
+      modalities: ttsAvailable ? 4 : 3,
+      validations: wordCount * (ttsAvailable ? 4 : 3),
+      time: `~${Math.round(wordCount * (ttsAvailable ? 4 : 3) * 0.4)} min`,
+      desc: ttsAvailable
+        ? 'Tout : QCM ↔, écriture, audio'
+        : 'Tout : QCM ↔, écriture (audio non dispo)',
+      detail: ttsAvailable
+        ? 'Maîtrise complète multi-modale'
+        : 'Identique au normal sans TTS',
+    },
+  ];
+
+  return (
+    <div className="slide-up">
+      <button onClick={onBack} style={{
+        background: 'transparent', border: 'none', color: C.teal, fontSize: 13, padding: 0, marginBottom: 16,
+      }}>← retour</button>
+
+      <p style={{ fontSize: 10, color: C.textDim, letterSpacing: 2, margin: '0 0 6px' }}>
+        AVANT DE COMMENCER
+      </p>
+      <p style={{ fontSize: 22, fontWeight: 500, margin: '0 0 8px', color: C.text }}>
+        Quelle intensité ?
+      </p>
+      <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 24px', lineHeight: 1.6 }}>
+        Tu apprends <span style={{ color: C.text, fontWeight: 500 }}>{wordCount} mots</span> dans cette leçon.
+        Choisis ton niveau d'approfondissement pour la Phase 1.
+        Tu pourras le changer plus tard.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
+        {options.map(opt => {
+          const isActive = currentIntensity === opt.key;
+          return (
+            <button key={opt.key} onClick={() => onChosen(opt.key)} style={{
+              background: isActive ? `${opt.color}11` : C.bgCard,
+              border: `0.5px solid ${isActive ? opt.color : C.border}`,
+              borderLeft: `3px solid ${opt.color}`,
+              color: C.text, padding: 16, borderRadius: 8, textAlign: 'left',
+              display: 'flex', alignItems: 'flex-start', gap: 14,
+            }}>
+              <span style={{ fontSize: 24, color: opt.color, lineHeight: 1, marginTop: 2 }}>
+                {opt.icon}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                  <p style={{ fontSize: 15, fontWeight: 600, margin: 0, color: C.text }}>
+                    {opt.label}
+                    {isActive && <span style={{ fontSize: 10, color: opt.color, marginLeft: 8, letterSpacing: 1 }}>
+                      ✓ ACTUEL
+                    </span>}
+                  </p>
+                  <span style={{ fontSize: 11, color: opt.color, fontWeight: 500 }}>
+                    {opt.validations} exos · {opt.time}
+                  </span>
+                </div>
+                <p style={{ fontSize: 12, color: C.textDim, margin: '0 0 4px' }}>
+                  {opt.desc}
+                </p>
+                <p style={{ fontSize: 11, color: C.textFaint, margin: 0, fontStyle: 'italic' }}>
+                  {opt.detail}
+                </p>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <p style={{ fontSize: 10, color: C.textFaint, textAlign: 'center', margin: '0 0 8px', lineHeight: 1.5 }}>
+        Tu peux changer l'intensité à tout moment depuis l'écran de la leçon.
+      </p>
     </div>
   );
 }
